@@ -235,6 +235,7 @@ impl Session {
         // (e.g. RP235x_riscv) the target's debug_sequence is Riscv; use default ARM sequence.
         let sequence_handle = match &target.debug_sequence {
             DebugSequence::Arm(sequence) => sequence.clone(),
+            DebugSequence::ArmRiscv { arm, .. } => arm.clone(),
             DebugSequence::Riscv(_) => DefaultArmSequence::create(),
             _ => unreachable!("DAP path only used for ARM or RISC-V-over-mem-AP targets"),
         };
@@ -531,6 +532,11 @@ impl Session {
             DebugSequence::Riscv(sequence) => {
                 for core_id in 0..session.cores.len() {
                     sequence.on_connect(&mut session.get_riscv_interface(core_id)?)?;
+                }
+            }
+            DebugSequence::ArmRiscv { riscv, .. } => {
+                for core_id in 0..session.cores.len() {
+                    riscv.on_connect(&mut session.get_riscv_interface(core_id)?)?;
                 }
             }
             _ => unreachable!("Other architectures should have already been handled"),
@@ -837,6 +843,9 @@ impl Session {
             DebugSequence::Riscv(riscv_debug_sequence) => {
                 riscv_debug_sequence.prepare_running_on_ram(self, vector_table_addr, core_id)
             }
+            DebugSequence::ArmRiscv { riscv, .. } => {
+                riscv.prepare_running_on_ram(self, vector_table_addr, core_id)
+            }
             DebugSequence::Xtensa(xtensa_debug_sequence) => {
                 xtensa_debug_sequence.prepare_running_on_ram(self, vector_table_addr, core_id)
             }
@@ -847,6 +856,7 @@ impl Session {
     pub fn has_sequence_erase_all(&self) -> bool {
         match &self.target.debug_sequence {
             DebugSequence::Arm(seq) => seq.debug_erase_sequence().is_some(),
+            DebugSequence::ArmRiscv { arm, .. } => arm.debug_erase_sequence().is_some(),
             // Currently, debug_erase_sequence is ARM (and ATSAM) specific
             _ => false,
         }
@@ -871,8 +881,10 @@ impl Session {
             }
         };
 
-        let DebugSequence::Arm(ref debug_sequence) = self.target.debug_sequence else {
-            unreachable!("This should never happen. Please file a bug if it does.");
+        let debug_sequence = match &self.target.debug_sequence {
+            DebugSequence::Arm(debug_sequence) => debug_sequence,
+            DebugSequence::ArmRiscv { arm, .. } => arm,
+            _ => unreachable!("This should never happen. Please file a bug if it does."),
         };
 
         let erase_sequence = debug_sequence
@@ -938,6 +950,7 @@ impl Session {
 
         let sequence_handle = match &self.target.debug_sequence {
             DebugSequence::Arm(sequence) => sequence.clone(),
+            DebugSequence::ArmRiscv { arm, .. } => arm.clone(),
             _ => unreachable!("Mismatch between architecture and sequence type!"),
         };
 

@@ -514,8 +514,11 @@ mod tests {
         let registry = Registry::from_builtin_families();
         let target = registry.get_target_by_name("WS63").unwrap();
         assert!(
-            matches!(target.debug_sequence, crate::config::DebugSequence::Arm(_)),
-            "WS63 should resolve to a HiSilicon ARM debug sequence, got {:?}",
+            matches!(
+                target.debug_sequence,
+                crate::config::DebugSequence::ArmRiscv { .. }
+            ),
+            "WS63 should resolve to a HiSilicon ARM+RISC-V debug sequence, got {:?}",
             target.debug_sequence
         );
     }

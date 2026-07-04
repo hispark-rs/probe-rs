@@ -1046,6 +1046,7 @@ impl<O: Operation> ActiveFlasher<'_, '_, O> {
         let mut last_read = Instant::now();
 
         let poll_interval = Duration::from_millis(self.flash_algorithm.rtt_poll_interval);
+        let status_poll_interval = Duration::from_millis(1);
 
         loop {
             match self
@@ -1077,6 +1078,8 @@ impl<O: Operation> ActiveFlasher<'_, '_, O> {
                 self.read_rtt()?;
                 return Err(FlashError::Core(Error::Timeout));
             }
+
+            std::thread::sleep(status_poll_interval);
         }
 
         self.check_for_stack_overflow()?;

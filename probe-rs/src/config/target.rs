@@ -264,6 +264,13 @@ pub enum DebugSequence {
     Arm(Arc<dyn ArmDebugSequence>),
     /// A RISC-V debug sequence.
     Riscv(Arc<dyn RiscvDebugSequence>),
+    /// Separate ARM DAP and RISC-V core debug sequences for RISC-V-over-ARM-DAP targets.
+    ArmRiscv {
+        /// Sequence used for ARM DAP-level bring-up/reset operations.
+        arm: Arc<dyn ArmDebugSequence>,
+        /// Sequence used for RISC-V core operations.
+        riscv: Arc<dyn RiscvDebugSequence>,
+    },
     /// An Xtensa debug sequence.
     Xtensa(Arc<dyn XtensaDebugSequence>),
 }

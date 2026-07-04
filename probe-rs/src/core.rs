@@ -710,6 +710,7 @@ impl ResolvedCoreOptions {
             CoreAccessOptions::Arm(options) => {
                 let sequence = match &target.debug_sequence {
                     DebugSequence::Arm(s) => s.clone(),
+                    DebugSequence::ArmRiscv { arm, .. } => arm.clone(),
                     _ => DefaultArmSequence::create(),
                 };
                 Self::Arm { sequence, options }
@@ -717,6 +718,7 @@ impl ResolvedCoreOptions {
             CoreAccessOptions::Riscv(options) => {
                 let sequence = match &target.debug_sequence {
                     DebugSequence::Riscv(s) => s.clone(),
+                    DebugSequence::ArmRiscv { riscv, .. } => riscv.clone(),
                     _ => DefaultRiscvSequence::create(),
                 };
                 Self::Riscv { sequence, options }

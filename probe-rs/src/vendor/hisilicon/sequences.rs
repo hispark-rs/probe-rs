@@ -16,13 +16,14 @@
 //!
 //! HiSilicon's official OpenOCD (`HISPARK_TRACE_MODIFIES` in `riscv-013.c`)
 //! avoids this by using the system controller's software reset (`sc_sys_res`)
-//! instead of `ndmreset`, then waiting 500 ms for the halt to take effect.
+//! instead of `ndmreset`. OpenOCD then issues an asynchronous halt request and
+//! waits 500 ms. In probe-rs, `halt()` is synchronous, so this sequence waits
+//! before halting to avoid stopping the boot ROM before SFC initialization.
 //!
 //! We replicate that behavior here: [`Ws63`] implements both
 //! [`ArmDebugSequence`] (for DAP bring-up) and [`RiscvDebugSequence`] (for
-//! SFC-safe reset). The vendor returns `DebugSequence::Riscv(...)` so the
-//! RISC-V core gets the custom reset; the ARM DAP bring-up path falls back to
-//! `DefaultArmSequence` (see `session.rs`).
+//! SFC-safe reset). The vendor returns `DebugSequence::ArmRiscv(...)` so each
+//! architecture path gets the correct sequence.
 //!
 //! [`RiscvCoreAccessOptions::dm_base`]: probe_rs_target::RiscvCoreAccessOptions
 
@@ -113,13 +114,14 @@ impl RiscvDebugSequence for Ws63 {
     /// 5. Wait 5 ms for reset to take effect
     /// 6. Read `SC_HRST_RES` to add clocks (ensure writes committed)
     /// 7. Wait 10 ms for chip to complete reset
-    /// 8. `target_halt()` — request halt
-    /// 9. Wait 500 ms for halt to take effect
-    /// 10. Set PC to program entry (`0x3000004`)
+    /// 8. Wait 500 ms for boot ROM/SFC initialization
+    /// 9. Halt the core using probe-rs' synchronous halt operation
     ///
-    /// Steps 1–7 mirror `assert_reset` / `reset_registers_set`. Steps 8–10
-    /// mirror `deassert_reset`. We don't set PC here — that's left to the
-    /// caller (probe-rs `reset` resumes after `reset_and_halt`).
+    /// Steps 1–7 mirror `assert_reset` / `reset_registers_set`. OpenOCD then
+    /// calls `target_halt()` and waits 500 ms. Because probe-rs `halt()` waits
+    /// until the core is halted, calling it immediately would stop the boot ROM
+    /// too early. Waiting first preserves the OpenOCD intent while matching the
+    /// probe-rs API semantics.
     fn reset_system_and_halt(
         &self,
         interface: &mut RiscvCommunicationInterface,
@@ -149,19 +151,13 @@ impl RiscvDebugSequence for Ws63 {
         // 7. Wait 10 ms for chip to complete reset
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        // --- deassert_reset ---
-
-        // 8. Request halt
-        tracing::debug!("WS63: requesting halt after system reset");
-        interface.halt(std::time::Duration::from_secs(1))?;
-
-        // 9. Wait 500 ms for halt to take effect (OpenOCD: deassert_reset)
+        // OpenOCD issues target_halt() and then waits 500 ms. In probe-rs,
+        // halt() is synchronous, so wait before halting to let the boot ROM
+        // finish SFC initialization.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        // 10. OpenOCD sets PC to 0x3000004 here. We skip this — probe-rs
-        //     `reset()` calls `reset_and_halt()` then `resume_core()`, which
-        //     will resume from wherever the hart halted. If the caller needs
-        //     a specific entry point they can set PC explicitly.
+        tracing::debug!("WS63: halting core after boot ROM/SFC stabilization");
+        interface.halt(std::time::Duration::from_secs(1))?;
 
         Ok(())
     }
