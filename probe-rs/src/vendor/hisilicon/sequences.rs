@@ -151,17 +151,34 @@ impl RiscvDebugSequence for Ws63 {
 
         // --- deassert_reset ---
 
-        // 8. Request halt
-        tracing::debug!("WS63: requesting halt after system reset");
-        interface.halt(std::time::Duration::from_secs(1))?;
+        // 8. Deferred halt: write haltreq to DM but do NOT poll immediately.
+        //    The system reset has just released; the CPU is running through
+        //    Boot ROM → flashboot → app.  Waiting before checking allhalted
+        //    lets Boot ROM complete SFC init.  OpenOCD's "deassert_reset"
+        //    does the same: target_halt + 500 ms wait.
+        //
+        //    We can't use interface.halt() here — it's synchronous (write
+        //    haltreq + immediate poll), which catches the CPU too early in
+        //    Boot ROM, before SFC is initialised.
+        
+        tracing::debug!("WS63: requesting deferred halt after system reset");
 
-        // 9. Wait 500 ms for halt to take effect (OpenOCD: deassert_reset)
+        // Write haltreq without waiting
+        let mut dmcontrol: crate::architecture::riscv::Dmcontrol =
+            interface.read_dm_register()?;
+        dmcontrol.set_dmactive(true);
+        dmcontrol.set_haltreq(true);
+        interface.write_dm_register(dmcontrol)?;
+
+        // 9. Wait 500 ms for Boot ROM + flashboot to complete (OpenOCD: deassert_reset).
+        //    After this, the CPU should be in the app (or flashboot) region.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        // 10. OpenOCD sets PC to 0x3000004 here. We skip this — probe-rs
-        //     `reset()` calls `reset_and_halt()` then `resume_core()`, which
-        //     will resume from wherever the hart halted. If the caller needs
-        //     a specific entry point they can set PC explicitly.
+        // Now confirm the hart is halted (synchronous poll).
+        dmcontrol.set_haltreq(false);
+        interface.write_dm_register(dmcontrol)?;
+        interface.wait_for_core_halted(std::time::Duration::from_secs(2))?;
+        tracing::debug!("WS63: core halted after system reset");
 
         Ok(())
     }
