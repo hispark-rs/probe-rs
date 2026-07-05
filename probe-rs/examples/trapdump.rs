@@ -11,7 +11,8 @@ use probe_rs::{MemoryInterface, Permissions, RegisterId};
 use std::time::Duration;
 
 fn rd(core: &mut probe_rs::Core, id: u16) -> u32 {
-    core.read_core_reg::<u32>(RegisterId(id)).unwrap_or(0xDEAD_BEEF)
+    core.read_core_reg::<u32>(RegisterId(id))
+        .unwrap_or(0xDEAD_BEEF)
 }
 
 fn main() -> Result<()> {
@@ -19,8 +20,11 @@ fn main() -> Result<()> {
     // Chip description: override with YAML=<path>; defaults to the in-tree WS63 target.
     let yaml_path = std::env::var("YAML")
         .unwrap_or_else(|_| "probe-rs/targets/HiSilicon_WS63.yaml".to_string());
-    let yaml = std::fs::read_to_string(&yaml_path)
-        .map_err(|e| anyhow!("read chip yaml {yaml_path}: {e} (set YAML=<path> or run from the probe-rs repo root)"))?;
+    let yaml = std::fs::read_to_string(&yaml_path).map_err(|e| {
+        anyhow!(
+            "read chip yaml {yaml_path}: {e} (set YAML=<path> or run from the probe-rs repo root)"
+        )
+    })?;
     let mut registry = Registry::from_builtin_families();
     registry.add_target_family_from_yaml(&yaml)?;
     let target = registry.get_target_by_name("WS63")?;
@@ -31,8 +35,11 @@ fn main() -> Result<()> {
     let mut probe = info.open()?;
     probe.select_protocol(WireProtocol::Swd)?;
 
-    let mut session =
-        probe.attach_with_registry(TargetSelector::Specified(target), Permissions::default(), &registry)?;
+    let mut session = probe.attach_with_registry(
+        TargetSelector::Specified(target),
+        Permissions::default(),
+        &registry,
+    )?;
     let mut core = session.core(0)?;
 
     // Catch blinky at its true entry: set a HW breakpoint at the flashboot jump
@@ -45,7 +52,9 @@ fn main() -> Result<()> {
         .unwrap_or(0x0023_0300);
     core.reset_and_halt(Duration::from_millis(500))?;
     let rpc: u64 = core.read_core_reg(RegisterId(0x7b1))?;
-    println!("after reset_and_halt: pc={rpc:#010x}  (reset vector if halt-on-reset works; ~0x1000b8 if not)");
+    println!(
+        "after reset_and_halt: pc={rpc:#010x}  (reset vector if halt-on-reset works; ~0x1000b8 if not)"
+    );
     dump(&mut core);
     core.set_hw_breakpoint(entry)?;
     println!("set bp @ {entry:#010x}, running...");
@@ -72,10 +81,7 @@ fn main() -> Result<()> {
     // Now run at FULL SPEED to a sequence of milestones in the rt startup path.
     // If a milestone isn't reached in time, the app crashed before it -> dump CSRs
     // (mepc points at the faulting PC, mcause the reason).
-    let milestones: &[(&str, u64)] = &[
-        ("runtime_init", 0x0023_0d9a),
-        ("main", 0x0023_0ca6),
-    ];
+    let milestones: &[(&str, u64)] = &[("runtime_init", 0x0023_0d9a), ("main", 0x0023_0ca6)];
     for (name, addr) in milestones {
         core.set_hw_breakpoint(*addr)?;
         println!("\n--- run to {name} @ {addr:#010x} ---");
@@ -129,11 +135,26 @@ fn main() -> Result<()> {
 }
 
 fn dump(core: &mut probe_rs::Core) {
-    println!("  mstatus={:#010x} mcause={:#010x} mepc={:#010x} mtval={:#010x}",
-        rd(core, 0x300), rd(core, 0x342), rd(core, 0x341), rd(core, 0x343));
-    println!("  mtvec  ={:#010x} mie   ={:#010x} mip  ={:#010x}",
-        rd(core, 0x305), rd(core, 0x304), rd(core, 0x344));
+    println!(
+        "  mstatus={:#010x} mcause={:#010x} mepc={:#010x} mtval={:#010x}",
+        rd(core, 0x300),
+        rd(core, 0x342),
+        rd(core, 0x341),
+        rd(core, 0x343)
+    );
+    println!(
+        "  mtvec  ={:#010x} mie   ={:#010x} mip  ={:#010x}",
+        rd(core, 0x305),
+        rd(core, 0x304),
+        rd(core, 0x344)
+    );
     // GPRs: x1=ra .. x5=t0 .. via RegisterId(0x1000+n)
-    println!("  ra={:#010x} sp={:#010x} gp={:#010x} t0={:#010x} a0={:#010x}",
-        rd(core, 0x1001), rd(core, 0x1002), rd(core, 0x1003), rd(core, 0x1005), rd(core, 0x100a));
+    println!(
+        "  ra={:#010x} sp={:#010x} gp={:#010x} t0={:#010x} a0={:#010x}",
+        rd(core, 0x1001),
+        rd(core, 0x1002),
+        rd(core, 0x1003),
+        rd(core, 0x1005),
+        rd(core, 0x100a)
+    );
 }
