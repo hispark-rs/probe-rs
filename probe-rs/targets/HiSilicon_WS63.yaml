@@ -1,0 +1,62 @@
+name: HiSilicon WS63
+variants:
+- name: WS63
+  cores:
+  - name: main
+    type: riscv
+    core_access_options: !Riscv
+      hart_id: 0
+      mem_ap: !v1 0
+      dm_base: 2147483648
+  memory_map:
+  - !Ram
+    range:
+      start: 0x14c000
+      end: 0x150000
+    cores:
+    - main
+  - !Ram
+    range:
+      start: 0x180000
+      end: 0x184000
+    cores:
+    - main
+  - !Nvm
+    range:
+      start: 0x200000
+      end: 0xa00000
+    cores:
+    - main
+    access:
+      boot: true
+  - !Ram
+    range:
+      start: 0xa00000
+      end: 0xa90000
+    cores:
+    - main
+  flash_algorithms:
+  - ws63-sfc
+flash_algorithms:
+- name: ws63-sfc
+  description: ws63
+  default: true
+  instructions: ApCXBQAAg8WlOq3BQREGxgFGtwUASJlGI6TVMI1GI6DVMIOmBTCFionGk1bmAAUG7doBRrcG4P82lZMGAAIjpNUwI6alMC1FI6ClMAOlBTAFiQnFE1XmAAUGbdmXAAAA54DgKwFFskBBAYKABUWCgAERBs4izCbKSshOxlLElwQAAJOE5DIDxQQAMoQJxZcAAADngKAeBUV9FJFFI4CkAGN2tAqBRTcFAEgVRiMkxTATBjAYIyDFMAMmBTAFignGE9blAIUFbdqBRQMpBUATBlADIyTFMBMGMBgjIMUwAyYFMAWKCcYT1uUAhQVt2oFFgykFQFVGIyTFMBMGMBgjIMUwAyYFMAWKCcYT1uUAhQVt2gMkBUAFRQVKgUWXAAAA54BgIxN1+Q+iCTNlNQEjgEQBI5KkACODhAABRfJAYkTSREJJskkiSgVhgoCXAAAA54AgJXlxBtYi1CbSStBOzlLMVspayF7GYsRmwmrAroqXBQAAg8XFI+3BY44KDDKKtwUASCFmNwzg/xlJjUkTDfAPkwQAAhOLBTCTCwbgKpyJTAFFIyQrASMgOwGDJQsAhYmJxZNV5QAFBe3ZEwUABFaEY+SqABMEAASBQoFDEwU0ABNYJQBSgwFHk5gjAH1WFoWahmN8hQCDxwYAsxXtAJPF9f/xjTOW5wBNjiEHhQYFBeMRl/6FA9qYEQMjoMgQkQLjkwP9AUUjJJsBIyaLAZMVlADelbP1dQGThbUIIyC7AIMlCwCFiYnFk1XlAAUF7dkimrOKikCXAAAA54AgDSKc45gK9AFFEaAFRbJQIlSSVAJZ8kliStJKQkuySyJMkkwCTUVhgoABEQbOIswmykrITsYXCQAAEwmJEgNFCQAtzQFFNwQASIMlBDCFiYnFk1XlAAUF7dkjIAQwg0VJAJHh8UWDSVkAY5MJAIlJg0RpAJngkwQAAgVFlwAAAOeAgAgTBRADzoWXAAAA54CgB0VFpoWXAAAA54DgBgFFgyUEMIWJicWTVeUABQXt2QFFIyAEMCMACQARoAVF8kBiRNJEQkmySQVhgoABRbcFAEgRZhVIEwcwGGMExQKBRyOkBTEjoOUwg6YFMIWKicaT1ucAhQft2oOmBUCFigUF6f6CgIFGNwYASBlHIyTmMA1HIyDmMAMnBjAFiwnHE9fmAIUGbduBRiMgtkAjJKYwEwUwCCMgpjADJQYwBYkJxRPV5gCFBm3ZFwMAAGcAQ/hBEQbGIsQACAAAAAAAAAAAAAAAAAAA
+  pc_init: 0x70
+  pc_uninit: 0x278
+  pc_program_page: 0x154
+  pc_erase_sector: 0x2
+  data_section_offset: 0x3b4
+  flash_properties:
+    address_range:
+      start: 0x200000
+      end: 0xa00000
+    page_size: 0x100
+    erased_byte_value: 0xff
+    program_page_timeout: 1000
+    erase_sector_timeout: 30000
+    sectors:
+    - size: 0x1000
+      address: 0x0
+  cores:
+  - main

@@ -878,6 +878,13 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
         if result_status.allhalted() {
             self.state.is_halted = true;
+            // Ensure software breakpoints (ebreak) trap to debug mode even when the
+            // core halts via this fast path. Otherwise an ebreak — e.g. a flash
+            // algorithm's return trampoline — would raise an exception instead of
+            // halting. The slow path below already does this.
+            if !self.state.sw_breakpoint_debug_enabled {
+                self.debug_on_sw_breakpoint(true)?;
+            }
             // Cores have halted, we have nothing else to do but return.
             return Ok(());
         }
@@ -1071,8 +1078,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
         let csrr_cmd = assembly::csrr(8, Self::DCSR_REGNO);
         self.schedule_setup_program_buffer(&[csrr_cmd])?;
 
-        let mut postexec_cmd = AccessRegisterCommand(0);
-        postexec_cmd.set_postexec(true);
+        let postexec_cmd = self.postexec_command();
 
         self.run_with_s0_saved(|core| {
             core.execute_abstract_command(postexec_cmd.0)?;
@@ -1094,8 +1100,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
         let csrw_cmd = assembly::csrw(Self::DCSR_REGNO, 8);
         self.schedule_setup_program_buffer(&[csrw_cmd])?;
 
-        let mut postexec_cmd = AccessRegisterCommand(0);
-        postexec_cmd.set_postexec(true);
+        let postexec_cmd = self.postexec_command();
 
         self.run_with_s0_saved(|core| {
             core.restore_s0_xlen(value as u64)?;
@@ -2071,6 +2076,27 @@ impl<'state> RiscvCommunicationInterface<'state> {
         })
     }
 
+    /// Build a postexec-only abstract command (run the program buffer without a
+    /// register transfer) that strict DM implementations accept.
+    ///
+    /// A `postexec=1, transfer=0` command with `aarsize=0` is rejected as
+    /// `NotSupported` (abstractcs.cmderr=2) by some DMs — notably the HiSilicon
+    /// WS63. OpenOCD always issues such commands with a valid `aarsize` and
+    /// `regno=x0`; we match that so the program buffer can be executed.
+    fn postexec_command(&self) -> AccessRegisterCommand {
+        let mut cmd = AccessRegisterCommand(0);
+        cmd.set_cmd_type(0);
+        cmd.set_postexec(true);
+        cmd.set_transfer(false);
+        cmd.set_aarsize(if self.state.xlen_64 {
+            RiscvBusAccess::A64
+        } else {
+            RiscvBusAccess::A32
+        });
+        cmd.set_regno(0x1000); // x0
+        cmd
+    }
+
     pub(crate) fn execute_abstract_command(&mut self, command: u32) -> Result<(), RiscvError> {
         // ensure that preconditions are fulfilled
         // haltreq      = 0
@@ -2256,8 +2282,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
             // Read CSR value into register 8 (s0)
             let csrr_cmd = assembly::csrr(8, address);
             core.schedule_setup_program_buffer(&[csrr_cmd])?;
-            let mut postexec_cmd = AccessRegisterCommand(0);
-            postexec_cmd.set_postexec(true);
+            let postexec_cmd = core.postexec_command();
             core.run_with_s0_saved(|c| {
                 c.execute_abstract_command(postexec_cmd.0)?;
                 c.read_s0_xlen()
@@ -2295,8 +2320,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
             }
             let csrw_cmd = assembly::csrw(address, 8);
             core.schedule_setup_program_buffer(&[csrw_cmd])?;
-            let mut postexec_cmd = AccessRegisterCommand(0);
-            postexec_cmd.set_postexec(true);
+            let postexec_cmd = core.postexec_command();
             core.run_with_s0_saved(|c| {
                 c.write_s0_xlen(value)?;
                 c.execute_abstract_command(postexec_cmd.0)
@@ -2536,6 +2560,25 @@ impl<'state> RiscvCommunicationInterface<'state> {
     pub fn reset_hart_and_halt(&mut self, timeout: Duration) -> Result<(), RiscvError> {
         tracing::debug!("Resetting core, setting hartreset bit");
 
+        // Prefer the DM's dedicated halt-on-reset request (`resethaltreq`) when the
+        // hardware advertises it (`dmstatus.hasresethaltreq`). It makes the hart halt
+        // at the FIRST instruction out of reset (the reset vector). The fallback below
+        // relies on a held `haltreq`, which on some targets lets the hart execute a
+        // handful of instructions before the halt actually lands — e.g. on the
+        // HiSilicon WS63 a plain `haltreq` reset ends up deep in the mask ROM with
+        // stale CSRs (mepc/mcause left over from a prior run) instead of at the reset
+        // vector, which is misleading when debugging. Arming `resethaltreq` before the
+        // reset pulse fixes that. Disarmed again once the hart is confirmed halted.
+        let halt_on_reset = self.supports_reset_halt_req().unwrap_or(false);
+        if halt_on_reset {
+            tracing::debug!("DM supports resethaltreq; arming halt-on-reset before reset");
+            let mut dmcontrol = self.state.current_dmcontrol;
+            dmcontrol.set_dmactive(true);
+            dmcontrol.set_resethaltreq(true);
+            dmcontrol.set_clrresethaltreq(false);
+            self.write_dm_register(dmcontrol)?;
+        }
+
         let mut dmcontrol = self.state.current_dmcontrol;
         dmcontrol.set_dmactive(true);
         dmcontrol.set_hartreset(true);
@@ -2604,6 +2647,13 @@ impl<'state> RiscvCommunicationInterface<'state> {
         dmcontrol.set_ackhavereset(true);
         dmcontrol.set_hartreset(false);
         dmcontrol.set_ndmreset(false);
+        if halt_on_reset {
+            // Disarm halt-on-reset: clear the (W1) setresethaltreq we kept asserting
+            // through the reset loop and pulse clrresethaltreq instead, so later plain
+            // resumes/resets aren't affected by a lingering halt-on-reset latch.
+            dmcontrol.set_resethaltreq(false);
+            dmcontrol.set_clrresethaltreq(true);
+        }
 
         self.write_dm_register(dmcontrol)?;
 

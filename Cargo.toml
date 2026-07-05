@@ -27,7 +27,9 @@ members = [
     "probe-rs-espressif",
     "probe-rs-linux",
 ]
-exclude = ["probe-rs/tests/gpio-hal-blinky"]
+exclude = [
+    "probe-rs/tests/gpio-hal-blinky",
+]
 
 [workspace.dependencies]
 probe-rs = { path = "probe-rs", version = "0.31.0" }
