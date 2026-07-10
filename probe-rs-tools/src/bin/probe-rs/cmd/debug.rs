@@ -8,7 +8,7 @@ use rustyline_async::SharedWriter;
 use rustyline_async::{Readline, ReadlineEvent};
 use time::UtcOffset;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 
 use crate::cmd::dap_server::debug_adapter::dap::adapter::DebugAdapter;
 use crate::cmd::dap_server::debug_adapter::dap::dap_types;
@@ -43,7 +43,7 @@ use super::dap_server::debug_adapter::dap::dap_types::Response;
 /// A barebones adapter for the CLI "client".
 struct CliAdapter {
     req_receiver: Receiver<Request>,
-    msg_sender: Sender<(String, Option<serde_json::Value>)>,
+    msg_sender: UnboundedSender<(String, Option<serde_json::Value>)>,
     console_log_level: ConsoleLog,
     seq: i64,
     pending: HashMap<i64, Request>,
@@ -70,19 +70,19 @@ impl ProtocolAdapter for CliAdapter {
         event_body: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         self.msg_sender
-            .try_send((event_type.to_string(), event_body))
-            .unwrap();
+            .send((event_type.to_string(), event_body))
+            .map_err(|_| anyhow::anyhow!("CLI debug message receiver closed"))?;
 
         Ok(())
     }
 
     fn send_raw_response(&mut self, response: Response) -> anyhow::Result<()> {
         self.msg_sender
-            .try_send((
+            .send((
                 "response".to_string(),
                 Some(serde_json::to_value(response)?),
             ))
-            .unwrap();
+            .map_err(|_| anyhow::anyhow!("CLI debug message receiver closed"))?;
 
         Ok(())
     }
@@ -192,7 +192,11 @@ pub struct Cmd {
 impl Cmd {
     pub async fn run(self, client: RpcClient, utc_offset: UtcOffset) -> anyhow::Result<()> {
         let (req_sender, req_receiver) = mpsc::channel(10);
-        let (msg_sender, mut msg_receiver) = mpsc::channel(10);
+        // ProtocolAdapter is synchronous, so it cannot await capacity on a
+        // bounded Tokio channel. A burst of output events used to fill the
+        // ten-message channel and panic on `try_send().unwrap()`. This channel
+        // is process-local and continuously drained by the CLI event loop.
+        let (msg_sender, mut msg_receiver) = mpsc::unbounded_channel();
 
         let debug_adapter = DebugAdapter::new(CliAdapter {
             req_receiver,
@@ -401,6 +405,36 @@ impl Cmd {
         server_result??;
 
         readline_result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_adapter_accepts_event_bursts_without_panicking() {
+        let (_req_sender, req_receiver) = mpsc::channel(1);
+        let (msg_sender, mut msg_receiver) = mpsc::unbounded_channel();
+        let mut adapter = CliAdapter {
+            req_receiver,
+            msg_sender,
+            console_log_level: ConsoleLog::Console,
+            seq: 0,
+            pending: HashMap::new(),
+        };
+
+        for sequence in 0..32 {
+            adapter
+                .dyn_send_event("output", Some(serde_json::json!({ "sequence": sequence })))
+                .unwrap();
+        }
+
+        for sequence in 0..32 {
+            let (event, body) = msg_receiver.try_recv().unwrap();
+            assert_eq!(event, "output");
+            assert_eq!(body.unwrap()["sequence"], sequence);
+        }
     }
 }
 
