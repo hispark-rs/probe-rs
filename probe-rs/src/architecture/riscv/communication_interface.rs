@@ -309,8 +309,8 @@ pub struct RiscvCommunicationInterfaceState {
     /// Number of scratch registers
     nscratch: u8,
 
-    /// Whether the target supports autoexecuting the program buffer
-    supports_autoexec: bool,
+    /// Whether accessing DATA0 can automatically execute the current command.
+    supports_autoexec_data0: bool,
 
     /// Pointer to the configuration string
     confstrptr: Option<u128>,
@@ -388,7 +388,7 @@ impl RiscvCommunicationInterfaceState {
 
             nscratch: 0,
 
-            supports_autoexec: false,
+            supports_autoexec_data0: false,
 
             confstrptr: None,
 
@@ -755,17 +755,23 @@ impl<'state> RiscvCommunicationInterface<'state> {
         self.state.nscratch = hartinfo.nscratch() as u8;
         tracing::debug!("Number of dscratch registers: {}", self.state.nscratch);
 
-        // determine if autoexec works
+        // Determine whether DATA0 autoexec works. Program-buffer autoexec bits
+        // are independent optional capabilities and are not required by our
+        // pipelined memory access. Requiring every implemented progbuf bit to
+        // read back used to incorrectly disable DATA0 autoexec on targets such
+        // as the HiSilicon WS63 (readback 0x1).
         let mut abstractauto = Abstractauto(0);
-        abstractauto.set_autoexecprogbuf(2u32.pow(self.state.progbuf_size as u32) - 1);
-        abstractauto.set_autoexecdata(2u32.pow(self.state.data_register_count as u32) - 1);
+        abstractauto.set_autoexecdata(1);
 
         self.schedule_write_dm_register(abstractauto)?;
 
         let abstractauto_readback: Abstractauto = self.read_dm_register()?;
 
-        self.state.supports_autoexec = abstractauto_readback == abstractauto;
-        tracing::debug!("Support for autoexec: {}", self.state.supports_autoexec);
+        self.state.supports_autoexec_data0 = abstractauto_readback.autoexecdata() & 1 != 0;
+        tracing::debug!(
+            "Support for DATA0 autoexec: {}",
+            self.state.supports_autoexec_data0
+        );
 
         // clear abstractauto
         abstractauto = Abstractauto(0);
@@ -1877,7 +1883,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
                 assembly::addi(8, 8, V::WIDTH.byte_width() as i16),
             ])?;
 
-            let use_autoexec = core.state.supports_autoexec && data.len() >= 16;
+            let use_autoexec = core.state.supports_autoexec_data0 && data.len() >= 16;
 
             let read_result: Result<(), RiscvError> = if use_autoexec {
                 core.read_multiple_autoexec(address, data)
@@ -2029,6 +2035,17 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
             core.write_address_to_s0(address)?;
 
+            if core.state.supports_autoexec_data0 && data.len() >= 16 {
+                let result = core.write_multiple_autoexec(data);
+
+                // Always leave autoexec disabled before restoring registers,
+                // including after an abstract-command failure.
+                let _ = core.write_dm_register(Abstractauto(0));
+                let _ = core.restore_s0(s0);
+                let _ = core.restore_s1(s1);
+                return result;
+            }
+
             for value in data {
                 // write data into data 0
                 core.schedule_write_dm_register(Data0((*value).into()))?;
@@ -2066,6 +2083,42 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
             Ok(())
         })
+    }
+
+    /// Write a consecutive batch through DATA0 autoexec.
+    ///
+    /// The first value is transferred to S1 and executes the already-installed
+    /// `sw; addi` program explicitly. Each later DATA0 write automatically
+    /// repeats that command, reducing the transport from two DMI writes per
+    /// target word to one. This follows the RISC-V Debug Specification and the
+    /// OpenOCD program-buffer write pipeline.
+    fn write_multiple_autoexec<V: RiscvValue32>(&mut self, data: &[V]) -> Result<(), RiscvError> {
+        debug_assert!(!data.is_empty());
+
+        self.write_dm_register(Data0(data[0].into()))?;
+
+        let mut command = AccessRegisterCommand(0);
+        command.set_cmd_type(0);
+        command.set_transfer(true);
+        command.set_write(true);
+        command.set_aarsize(RiscvBusAccess::A32);
+        command.set_postexec(true);
+        command.set_regno(registers::S1.id.0 as u32);
+        self.execute_abstract_command(command.0)?;
+
+        if data.len() == 1 {
+            return Ok(());
+        }
+
+        let mut abstractauto = Abstractauto(0);
+        abstractauto.set_autoexecdata(1);
+        self.write_dm_register(abstractauto)?;
+
+        for value in &data[1..] {
+            self.write_dm_register(Data0((*value).into()))?;
+        }
+
+        self.wait_for_abstract_idle(Duration::from_millis(100))
     }
 
     /// Build a postexec-only abstract command (run the program buffer without a
