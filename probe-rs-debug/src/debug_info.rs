@@ -122,7 +122,11 @@ impl DebugInfo {
             let mut ranges = match self.dwarf.unit_ranges(unit) {
                 Ok(ranges) => ranges,
                 Err(error) => {
-                    tracing::warn!(
+                    // A mixed-language ELF may contain individual vendor units
+                    // with malformed range data while the remaining Rust DWARF
+                    // is usable. This lookup runs once per frame/address, so a
+                    // warning here floods interactive debugger clients.
+                    tracing::debug!(
                         "No valid source code ranges found for unit {:?}: {:?}",
                         unit.dwo_name(),
                         error
@@ -141,7 +145,7 @@ impl DebugInfo {
                 let (program, sequences) = match ilnp.sequences() {
                     Ok(value) => value,
                     Err(error) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             "No valid source code ranges found for address {}: {:?}",
                             address,
                             error
