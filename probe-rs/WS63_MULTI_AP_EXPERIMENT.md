@@ -90,12 +90,50 @@ The final post-stress baseline still read `0xefbeadde` through both AP0 and AP1.
 AP1 read throughput was 85.8 KiB/s for 4 KiB and 85.1 KiB/s for both 32 KiB and
 64 KiB; 1,000 AP0/AP1 matched read pairs completed without mismatch.
 
+## Explicit double-buffer experiment
+
+WS63 declares the narrow `system_memory_flash_buffers_while_running` target
+capability, but use still requires the explicit
+`--enable-riscv-system-memory-double-buffering` download flag. Without that
+flag, probe-rs behavior is unchanged. The specialized entry point is write-only
+and is called only for flash page buffers; generic running-state `MemoryInterface`
+traffic remains on the legacy path.
+
+The host tracks each buffer as `Empty`, `Ready`, `Busy`, or `Consumed`. It loads
+the ready buffer through AP1 while AP0 controls the active algorithm, waits with
+the flash algorithm's bounded page timeout before reusing the busy buffer, and
+marks it consumed only after successful completion. An AP1 error, including a
+partial write, is returned with AP and operation context and triggers a best-
+effort halt; no AP0 retry occurs.
+
+Aligned page buffers use 32-bit AP transfers. An initial byte-transfer revision
+was functionally correct but took about 2.68 s per 64 KiB page and was rejected
+for performance regression. The final path took 0.719--0.729 s per 64 KiB page.
+The multi-page RF result demonstrates a useful, though small, overlap window
+between the host upload and target SFC operation.
+
+All formal runs used full verify, 2 MHz SWD, physical nRST, and UART capture:
+
+| Planned image | Mode | CLI times | Wall times | Median result |
+| --- | --- | --- | --- | --- |
+| `uart_hello` | explicit AP1 double | 3.04 / 3.05 / 3.03 s | 5.38 / 5.68 / 5.66 s | 3.04 s |
+| `uart_hello` | single | 3.06 / 3.04 / 3.09 s | 5.67 / 5.65 / 5.71 s | 3.06 s |
+| `wifi_init_smoke --features full-init` | explicit AP1 double | 12.97 / 12.91 / 12.95 s | 15.59 / 15.47 / 15.57 s | 12.95 s |
+| `wifi_init_smoke --features full-init` | single | 13.30 / 13.22 / 13.29 s | 15.94 / 15.83 / 15.90 s | 13.29 s |
+
+The small image occupies one 64 KiB flash page, so its 0.02 s median difference
+is effectively noise. The six-page RF image improved median CLI time by 2.6%
+and wall time by 2.1%, without regressing the single-buffer path. Every measured
+run completed full verify. `uart_hello` printed its greeting and ticks after each
+reset. Every extended RF capture reached `RF1_IMAGE_OK`, `RF2_INIT_OK`, and
+`RF3_SCAN_OK`; the later `RF5B_CONFIG_ERR:0x00000005` / missing
+`RF5C_PING_OK` remains the known firmware/configuration issue.
+
 ## Deliberate limits
 
-- Running-state AP1 access is not enabled by target metadata.
+- Generic running-state AP1 access is not enabled by target metadata.
 - RTT/live-variable access is not moved to AP1 while the hart is running.
-- Double-buffer uploads remain on the legacy path while the flash algorithm is
-  running. Any future opt-in must be limited to flash page-buffer uploads and
-  account for the target's non-coherent D-cache; the presence of AP1 alone is
-  not sufficient authorization for generic running-state memory access.
+- Running AP1 flash-buffer uploads are separately target-authorized and remain
+  disabled unless the caller supplies the explicit experimental flag. They do
+  not authorize generic running-state memory access.
 - No HiSilicon image-format behavior is implemented in probe-rs.
