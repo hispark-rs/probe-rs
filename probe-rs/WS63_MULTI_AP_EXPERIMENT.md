@@ -52,11 +52,50 @@ RF image reached `RF2_INIT_OK` and `RF3_SCAN_OK count=0x0000000d`. Its later
 `RF5C_PING_OK` gate is a known firmware/configuration issue and is not treated
 as a flash-transport failure.
 
+## Running-state and recovery safety gate
+
+The destructive `ws63_multi_ap_safety` example saves and readback-verifies the
+complete `0x00a70000..0x00a80000` scratch range before disconnecting. A separate
+temporary CPU code slot is also saved and restored. The following tests used
+2 MHz SWD:
+
+- AP1 write/read/restore passed while the hart executed an idle loop for 4 KiB,
+  32 KiB, 64 KiB, 65,532 bytes, and 65,536 bytes. Running-state AP1 write
+  throughput was 85.2--89.0 KiB/s.
+- A plain RISC-V `fence rw,rw` was not sufficient for CPU/AP visibility. WS63
+  has a non-coherent 4 KiB data cache with 32-byte lines. AP1 write -> CPU read
+  passed only after the CPU invalidated the source line through `DCINCVA`
+  (`0x7c5`) and `DCMAINT` (`0x7c3`, command `0x5`). CPU write -> AP1 read passed
+  only after the CPU cleaned the destination line with command `0x9`.
+- 100 independent attach/AP0/AP1/disconnect cycles passed. Each cycle saved all
+  64 KiB, wrote and verified 4 KiB, then restored and verified all 64 KiB.
+- 100 physical nRST/reattach cycles passed with the same per-cycle protection
+  before reset.
+- AP access while nRST was asserted returned a DAP communication error; AP1
+  access recovered immediately after reset deassert and reconnect.
+- A reset after half of a logical 64 KiB transfer retained 0/8,192 committed
+  words and only 438/8,192 words from the nominally untouched suffix. The reset
+  boot path therefore makes the complete logical transfer untrustworthy. The
+  harness reattached and restored the whole protected range; software must not
+  resume the transfer or silently fall back after such a reset.
+
+The first reset-during-transfer harness revision incorrectly asserted that the
+committed prefix must survive reset and exited before its cleanup path when that
+assertion failed. This affected only the documented reserved scratch range; the
+test was corrected to treat all post-reset RAM as invalid and to unconditionally
+restore the complete range. Subsequent recovery and 100-cycle tests used the
+corrected behavior.
+
+The final post-stress baseline still read `0xefbeadde` through both AP0 and AP1.
+AP1 read throughput was 85.8 KiB/s for 4 KiB and 85.1 KiB/s for both 32 KiB and
+64 KiB; 1,000 AP0/AP1 matched read pairs completed without mismatch.
+
 ## Deliberate limits
 
 - Running-state AP1 access is not enabled by target metadata.
 - RTT/live-variable access is not moved to AP1 while the hart is running.
 - Double-buffer uploads remain on the legacy path while the flash algorithm is
-  running. They must not be enabled for AP1 until running-state access,
-  coherency, NoAck recovery, and repeated reset behavior have separate evidence.
+  running. Any future opt-in must be limited to flash page-buffer uploads and
+  account for the target's non-coherent D-cache; the presence of AP1 alone is
+  not sufficient authorization for generic running-state memory access.
 - No HiSilicon image-format behavior is implemented in probe-rs.
