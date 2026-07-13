@@ -12,6 +12,7 @@ variants:
       system_memory_ranges:
       - start: 0xa00000
         end: 0xa8df00
+      system_memory_flash_buffers_while_running: true
   memory_map:
   - !Ram
     range:
