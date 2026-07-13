@@ -220,6 +220,7 @@ fn create_core(processor: &Processor) -> Result<ProbeCore> {
                 dm_base: 0,
                 system_memory_ap: None,
                 system_memory_ranges: vec![],
+                system_memory_flash_buffers_while_running: false,
             }),
             Architecture::Xtensa => {
                 CoreAccessOptions::Xtensa(XtensaCoreAccessOptions { jtag_tap: None })

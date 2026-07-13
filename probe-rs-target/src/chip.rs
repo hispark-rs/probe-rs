@@ -259,6 +259,15 @@ pub struct RiscvCoreAccessOptions {
     /// empty list disables direct system-memory access.
     #[serde(default)]
     pub system_memory_ranges: Vec<Range<u64>>,
+
+    /// Whether a flash loader may explicitly use the system Memory-AP to fill
+    /// page buffers while the hart is running.
+    ///
+    /// This capability is deliberately narrower than generic running-state
+    /// memory access. It does not authorize RTT, live-variable, MMIO, read, or
+    /// ordinary debugger traffic, and callers must opt in separately.
+    #[serde(default)]
+    pub system_memory_flash_buffers_while_running: bool,
 }
 
 /// The data required to access an Xtensa core

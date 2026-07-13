@@ -371,6 +371,15 @@ impl ChipFamily {
                             ));
                         }
 
+                        if options.system_memory_flash_buffers_while_running
+                            && options.system_memory_ap.is_none()
+                        {
+                            return Err(format!(
+                                "Core {} enables running flash-buffer system-memory access without a system_memory_ap",
+                                core.name
+                            ));
+                        }
+
                         let mut previous_end = None;
                         for range in &options.system_memory_ranges {
                             if range.start >= range.end {
