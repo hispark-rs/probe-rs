@@ -3282,7 +3282,7 @@ mod direct_system_memory_tests {
     struct MemoryState {
         value: u32,
         writes: Vec<(u64, u32)>,
-        fail_write: bool,
+        fail_after_first_write: bool,
     }
 
     #[derive(Debug)]
@@ -3319,14 +3319,12 @@ mod direct_system_memory_tests {
 
         fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), ArmError> {
             let mut state = self.state.borrow_mut();
-            if state.fail_write {
-                return Err(ArmError::NoArmTarget);
+            for (index, value) in data.iter().enumerate() {
+                state.writes.push((address + index as u64 * 4, *value));
+                if state.fail_after_first_write {
+                    return Err(ArmError::NoArmTarget);
+                }
             }
-            state.writes.extend(
-                data.iter()
-                    .enumerate()
-                    .map(|(index, value)| (address + index as u64 * 4, *value)),
-            );
             Ok(())
         }
 
@@ -3513,7 +3511,7 @@ mod direct_system_memory_tests {
     #[test]
     fn overflow_and_ap_errors_are_not_silently_retried() {
         let memory = Rc::new(RefCell::new(MemoryState {
-            fail_write: true,
+            fail_after_first_write: true,
             ..Default::default()
         }));
         let mut interface = interface(true, memory.clone());
@@ -3537,7 +3535,7 @@ mod direct_system_memory_tests {
             ),
             "unexpected error: {write:?}"
         );
-        assert!(memory.borrow().writes.is_empty());
+        assert_eq!(memory.borrow().writes, [(0xa00000, 1)]);
     }
 }
 
