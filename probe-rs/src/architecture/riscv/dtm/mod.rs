@@ -3,7 +3,10 @@
 pub mod jtag_dtm;
 pub(crate) mod mem_ap_dtm;
 
-use crate::architecture::riscv::communication_interface::RiscvError;
+use crate::architecture::{
+    arm::{FullyQualifiedApAddress, memory::ArmMemoryInterface},
+    riscv::communication_interface::RiscvError,
+};
 use crate::probe::queue::DeferredResultIndex;
 use crate::probe::{CommandResult, DebugProbeError};
 use std::fmt;
@@ -11,6 +14,23 @@ use std::time::Duration;
 
 /// Debug Transport Module (DTM) access abstraction
 pub trait DtmAccess: fmt::Debug {
+    /// Returns the configured direct system-memory AP, if this DTM provides one.
+    fn system_memory_ap(&self) -> Option<&FullyQualifiedApAddress> {
+        None
+    }
+
+    /// Opens the direct system-memory interface when the complete byte range is allowed.
+    ///
+    /// Returning `None` preserves the normal RISC-V memory path. Callers are
+    /// responsible for enforcing any hart-state or coherency requirements.
+    fn system_memory_interface(
+        &mut self,
+        _address: u64,
+        _size: u64,
+    ) -> Result<Option<Box<dyn ArmMemoryInterface + '_>>, RiscvError> {
+        Ok(None)
+    }
+
     /// Perform interface-specific initialisation upon attaching.
     fn init(&mut self) -> Result<(), RiscvError> {
         Ok(())

@@ -6,12 +6,14 @@
 //! Each DMI register occupies 4 bytes, so address = register * 4
 
 use crate::architecture::arm::communication_interface::ArmDebugInterface;
+use crate::architecture::arm::memory::ArmMemoryInterface;
 use crate::architecture::arm::{ArmError, FullyQualifiedApAddress};
 use crate::architecture::riscv::communication_interface::RiscvError;
 use crate::architecture::riscv::dtm::DtmAccess;
 use crate::probe::queue::{DeferredResultIndex, DeferredResultSet};
 use crate::probe::{CommandResult, DebugProbeError};
 use std::fmt;
+use std::ops::Range;
 use std::time::Duration;
 
 /// DMI operation for the pending queue.
@@ -25,6 +27,8 @@ enum DmiOp {
 pub struct MemApDtm<'state> {
     interface: &'state mut dyn ArmDebugInterface,
     dmi_ap: FullyQualifiedApAddress,
+    system_memory_ap: Option<FullyQualifiedApAddress>,
+    system_memory_ranges: Vec<Range<u64>>,
     /// Base address of the Debug Module within the mem-AP address space. The DMI
     /// register window starts here (RP235x = 0; HiSilicon WS63 = 0x8000_0000).
     dm_base: u64,
@@ -36,6 +40,7 @@ impl fmt::Debug for MemApDtm<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemApDtm")
             .field("dmi_ap", &self.dmi_ap)
+            .field("system_memory_ap", &self.system_memory_ap)
             .field("pending_len", &self.pending.len())
             .finish()
     }
@@ -57,10 +62,14 @@ impl<'state> MemApDtm<'state> {
         interface: &'state mut dyn ArmDebugInterface,
         dmi_ap: FullyQualifiedApAddress,
         dm_base: u64,
+        system_memory_ap: Option<FullyQualifiedApAddress>,
+        system_memory_ranges: Vec<Range<u64>>,
     ) -> Self {
         Self {
             interface,
             dmi_ap,
+            system_memory_ap,
+            system_memory_ranges,
             dm_base,
             pending: Vec::new(),
             results: DeferredResultSet::new(),
@@ -74,6 +83,38 @@ impl<'state> MemApDtm<'state> {
 }
 
 impl DtmAccess for MemApDtm<'_> {
+    fn system_memory_ap(&self) -> Option<&FullyQualifiedApAddress> {
+        self.system_memory_ap.as_ref()
+    }
+
+    fn system_memory_interface(
+        &mut self,
+        address: u64,
+        size: u64,
+    ) -> Result<Option<Box<dyn ArmMemoryInterface + '_>>, RiscvError> {
+        let Some(end) = address.checked_add(size) else {
+            return Ok(None);
+        };
+        let requested = address..end;
+        let allowed = size != 0
+            && self
+                .system_memory_ranges
+                .iter()
+                .any(|range| range.start <= requested.start && requested.end <= range.end);
+        let Some(ap) = self.system_memory_ap.as_ref().filter(|_| allowed) else {
+            return Ok(None);
+        };
+
+        self.interface
+            .memory_interface(ap)
+            .map(Some)
+            .map_err(|source| RiscvError::SystemMemoryAccess {
+                ap: ap.clone(),
+                operation: "open",
+                source,
+            })
+    }
+
     fn init(&mut self) -> Result<(), RiscvError> {
         // No DTM control register; memory-mapped path is synchronous.
         Ok(())

@@ -4,6 +4,7 @@
 //! Debug Module, as described in the RISC-V debug
 //! specification v0.13 and v1.0.
 
+use crate::architecture::arm::{ArmError, FullyQualifiedApAddress, memory::ArmMemoryInterface};
 use crate::architecture::riscv::dtm::DtmAccess;
 use crate::memory::valid_32bit_address;
 use crate::probe::queue::DeferredResultIndex;
@@ -78,6 +79,25 @@ pub enum RiscvError {
     /// The hart is unavailable
     #[error("The requested hart is unavailable.")]
     HartUnavailable,
+    /// A direct system-memory operation through a CoreSight AP failed.
+    #[error("System-memory operation '{operation}' through {ap:?} failed")]
+    SystemMemoryAccess {
+        /// AP selected for the operation.
+        ap: FullyQualifiedApAddress,
+        /// Memory operation being performed.
+        operation: &'static str,
+        /// Underlying ARM DAP error.
+        #[source]
+        source: ArmError,
+    },
+    /// A requested direct system-memory range overflowed the address space.
+    #[error("System-memory range at {address:#x} with size {size:#x} overflows")]
+    SystemMemoryAddressOverflow {
+        /// First byte of the request.
+        address: u64,
+        /// Number of requested bytes.
+        size: u64,
+    },
 }
 
 impl From<RiscvError> for ProbeRsError {
@@ -528,6 +548,42 @@ impl<'state> RiscvCommunicationInterface<'state> {
         state: &'state mut RiscvCommunicationInterfaceState,
     ) -> Self {
         Self { dtm, state }
+    }
+
+    /// Execute an operation through the configured direct system-memory AP.
+    ///
+    /// This first implementation is deliberately halted-only. `Ok(None)` means
+    /// the caller must use the existing RISC-V memory path, either because the
+    /// target has no direct AP or because the range is not opted in.
+    fn try_system_memory<T>(
+        &mut self,
+        address: u64,
+        size: u64,
+        operation: &'static str,
+        access: impl FnOnce(&mut dyn ArmMemoryInterface) -> Result<T, ArmError>,
+    ) -> Result<Option<T>, ProbeRsError> {
+        if !self.state.is_halted {
+            return Ok(None);
+        }
+
+        let Some(ap) = self.dtm.system_memory_ap().cloned() else {
+            return Ok(None);
+        };
+        address
+            .checked_add(size)
+            .ok_or(RiscvError::SystemMemoryAddressOverflow { address, size })?;
+        let Some(mut memory) = self.dtm.system_memory_interface(address, size)? else {
+            return Ok(None);
+        };
+
+        access(memory.as_mut())
+            .map(Some)
+            .map_err(|source| RiscvError::SystemMemoryAccess {
+                ap,
+                operation,
+                source,
+            })
+            .map_err(Into::into)
     }
 
     /// Select current hart
@@ -2972,6 +3028,11 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
     }
 
     fn read_word_64(&mut self, address: u64) -> Result<u64, crate::error::Error> {
+        if let Some(value) = self.try_system_memory(address, 8, "read_word_64", |memory| {
+            memory.read_word_64(address)
+        })? {
+            return Ok(value);
+        }
         let mut ret = self.read_word::<u32>(address)? as u64;
         ret |= (self.read_word::<u32>(address + 4)? as u64) << 32;
 
@@ -2980,21 +3041,48 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
 
     fn read_word_32(&mut self, address: u64) -> Result<u32, crate::Error> {
         tracing::debug!("read_word_32 from {:#08x}", address);
+        if let Some(value) = self.try_system_memory(address, 4, "read_word_32", |memory| {
+            memory.read_word_32(address)
+        })? {
+            return Ok(value);
+        }
         self.read_word(address)
     }
 
     fn read_word_16(&mut self, address: u64) -> Result<u16, crate::Error> {
         tracing::debug!("read_word_16 from {:#08x}", address);
+        if let Some(value) = self.try_system_memory(address, 2, "read_word_16", |memory| {
+            memory.read_word_16(address)
+        })? {
+            return Ok(value);
+        }
         self.read_word(address)
     }
 
     fn read_word_8(&mut self, address: u64) -> Result<u8, crate::Error> {
         tracing::debug!("read_word_8 from {:#08x}", address);
+        if let Some(value) = self.try_system_memory(address, 1, "read_word_8", |memory| {
+            memory.read_word_8(address)
+        })? {
+            return Ok(value);
+        }
         self.read_word(address)
     }
 
     fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), crate::error::Error> {
         tracing::debug!("read_64 from {:#08x}", address);
+
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64 * 8, "read_64", |memory| {
+                memory.read_64(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
 
         for (i, d) in data.iter_mut().enumerate() {
             *d = self.read_word_64(address + i as u64 * 8)?;
@@ -3005,38 +3093,115 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
 
     fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), crate::Error> {
         tracing::debug!("read_32 from {:#08x}", address);
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64 * 4, "read_32", |memory| {
+                memory.read_32(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.read_multiple(address, data)
     }
 
     fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), crate::Error> {
         tracing::debug!("read_16 from {:#08x}", address);
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64 * 2, "read_16", |memory| {
+                memory.read_16(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.read_multiple(address, data)
     }
 
     fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), crate::Error> {
         tracing::debug!("read_8 from {:#08x}", address);
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64, "read_8", |memory| {
+                memory.read_8(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.read_multiple(address, data)
     }
 
     fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), crate::error::Error> {
+        if self
+            .try_system_memory(address, 8, "write_word_64", |memory| {
+                memory.write_word_64(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_word(address, data as u32)?;
         self.write_word(address + 4, (data >> 32) as u32)
     }
 
     fn write_word_32(&mut self, address: u64, data: u32) -> Result<(), crate::Error> {
+        if self
+            .try_system_memory(address, 4, "write_word_32", |memory| {
+                memory.write_word_32(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_word(address, data)
     }
 
     fn write_word_16(&mut self, address: u64, data: u16) -> Result<(), crate::Error> {
+        if self
+            .try_system_memory(address, 2, "write_word_16", |memory| {
+                memory.write_word_16(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_word(address, data)
     }
 
     fn write_word_8(&mut self, address: u64, data: u8) -> Result<(), crate::Error> {
+        if self
+            .try_system_memory(address, 1, "write_word_8", |memory| {
+                memory.write_word_8(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_word(address, data)
     }
 
     fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), crate::error::Error> {
         tracing::debug!("write_64 to {:#08x}", address);
+
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64 * 8, "write_64", |memory| {
+                memory.write_64(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
 
         for (i, d) in data.iter().enumerate() {
             self.write_word_64(address + i as u64 * 8, *d)?;
@@ -3047,16 +3212,49 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
 
     fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), crate::Error> {
         tracing::debug!("write_32 to {:#08x}", address);
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64 * 4, "write_32", |memory| {
+                memory.write_32(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_multiple(address, data)
     }
 
     fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), crate::Error> {
         tracing::debug!("write_16 to {:#08x}", address);
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64 * 2, "write_16", |memory| {
+                memory.write_16(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_multiple(address, data)
     }
 
     fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), crate::Error> {
         tracing::debug!("write_8 to {:#08x}", address);
+        if data.is_empty() {
+            return Ok(());
+        }
+        if self
+            .try_system_memory(address, data.len() as u64, "write_8", |memory| {
+                memory.write_8(address, data)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.write_multiple(address, data)
     }
 
@@ -3066,6 +3264,280 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
 
     fn flush(&mut self) -> Result<(), crate::Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod direct_system_memory_tests {
+    use super::*;
+    use crate::CoreStatus;
+    use crate::architecture::arm::ap::CSW;
+    use crate::architecture::arm::communication_interface::ArmDebugInterface;
+    use crate::probe::queue::{DeferredResultIndex, DeferredResultSet};
+    use crate::probe::{CommandResult, DebugProbeError};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Debug, Default)]
+    struct MemoryState {
+        value: u32,
+        writes: Vec<(u64, u32)>,
+        fail_write: bool,
+    }
+
+    #[derive(Debug)]
+    struct TestArmMemory {
+        ap: FullyQualifiedApAddress,
+        state: Rc<RefCell<MemoryState>>,
+    }
+
+    impl MemoryInterface<ArmError> for TestArmMemory {
+        fn supports_native_64bit_access(&mut self) -> bool {
+            false
+        }
+
+        fn read_64(&mut self, _address: u64, _data: &mut [u64]) -> Result<(), ArmError> {
+            unreachable!()
+        }
+
+        fn read_32(&mut self, _address: u64, data: &mut [u32]) -> Result<(), ArmError> {
+            data.fill(self.state.borrow().value);
+            Ok(())
+        }
+
+        fn read_16(&mut self, _address: u64, _data: &mut [u16]) -> Result<(), ArmError> {
+            unreachable!()
+        }
+
+        fn read_8(&mut self, _address: u64, _data: &mut [u8]) -> Result<(), ArmError> {
+            unreachable!()
+        }
+
+        fn write_64(&mut self, _address: u64, _data: &[u64]) -> Result<(), ArmError> {
+            unreachable!()
+        }
+
+        fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), ArmError> {
+            let mut state = self.state.borrow_mut();
+            if state.fail_write {
+                return Err(ArmError::NoArmTarget);
+            }
+            state.writes.extend(
+                data.iter()
+                    .enumerate()
+                    .map(|(index, value)| (address + index as u64 * 4, *value)),
+            );
+            Ok(())
+        }
+
+        fn write_16(&mut self, _address: u64, _data: &[u16]) -> Result<(), ArmError> {
+            unreachable!()
+        }
+
+        fn write_8(&mut self, _address: u64, _data: &[u8]) -> Result<(), ArmError> {
+            unreachable!()
+        }
+
+        fn supports_8bit_transfers(&self) -> Result<bool, ArmError> {
+            Ok(true)
+        }
+
+        fn flush(&mut self) -> Result<(), ArmError> {
+            Ok(())
+        }
+    }
+
+    impl ArmMemoryInterface for TestArmMemory {
+        fn fully_qualified_address(&self) -> FullyQualifiedApAddress {
+            self.ap.clone()
+        }
+
+        fn base_address(&mut self) -> Result<u64, ArmError> {
+            Ok(0)
+        }
+
+        fn get_arm_debug_interface(
+            &mut self,
+        ) -> Result<&mut dyn ArmDebugInterface, DebugProbeError> {
+            unreachable!()
+        }
+
+        fn generic_status(&mut self) -> Result<CSW, ArmError> {
+            unreachable!()
+        }
+
+        fn update_core_status(&mut self, _state: CoreStatus) {}
+    }
+
+    #[derive(Debug)]
+    struct TestDtm {
+        ap: FullyQualifiedApAddress,
+        allowed: Range<u64>,
+        state: Rc<RefCell<MemoryState>>,
+        results: DeferredResultSet<CommandResult>,
+    }
+
+    impl TestDtm {
+        fn new(state: Rc<RefCell<MemoryState>>) -> Self {
+            Self {
+                ap: FullyQualifiedApAddress::v1_with_default_dp(1),
+                allowed: 0xa00000..0xa8df00,
+                state,
+                results: DeferredResultSet::new(),
+            }
+        }
+    }
+
+    impl DtmAccess for TestDtm {
+        fn system_memory_ap(&self) -> Option<&FullyQualifiedApAddress> {
+            Some(&self.ap)
+        }
+
+        fn system_memory_interface(
+            &mut self,
+            address: u64,
+            size: u64,
+        ) -> Result<Option<Box<dyn ArmMemoryInterface + '_>>, RiscvError> {
+            let Some(end) = address.checked_add(size) else {
+                return Ok(None);
+            };
+            if size == 0 || address < self.allowed.start || end > self.allowed.end {
+                return Ok(None);
+            }
+            Ok(Some(Box::new(TestArmMemory {
+                ap: self.ap.clone(),
+                state: self.state.clone(),
+            })))
+        }
+
+        fn target_reset_assert(&mut self) -> Result<(), DebugProbeError> {
+            unreachable!()
+        }
+
+        fn target_reset_deassert(&mut self) -> Result<(), DebugProbeError> {
+            unreachable!()
+        }
+
+        fn clear_error_state(&mut self) -> Result<(), RiscvError> {
+            unreachable!()
+        }
+
+        fn read_deferred_result(
+            &mut self,
+            index: DeferredResultIndex,
+        ) -> Result<CommandResult, RiscvError> {
+            self.results
+                .take(index)
+                .map_err(|_| RiscvError::BatchedResultNotAvailable)
+        }
+
+        fn execute(&mut self) -> Result<(), RiscvError> {
+            unreachable!()
+        }
+
+        fn schedule_write(
+            &mut self,
+            _address: u64,
+            _value: u32,
+        ) -> Result<Option<DeferredResultIndex>, RiscvError> {
+            unreachable!()
+        }
+
+        fn schedule_read(&mut self, _address: u64) -> Result<DeferredResultIndex, RiscvError> {
+            unreachable!()
+        }
+
+        fn read_with_timeout(
+            &mut self,
+            _address: u64,
+            _timeout: Duration,
+        ) -> Result<u32, RiscvError> {
+            unreachable!()
+        }
+
+        fn write_with_timeout(
+            &mut self,
+            _address: u64,
+            _value: u32,
+            _timeout: Duration,
+        ) -> Result<Option<u32>, RiscvError> {
+            unreachable!()
+        }
+
+        fn read_idcode(&mut self) -> Result<Option<u32>, DebugProbeError> {
+            unreachable!()
+        }
+    }
+
+    fn interface(
+        halted: bool,
+        memory: Rc<RefCell<MemoryState>>,
+    ) -> RiscvCommunicationInterface<'static> {
+        let mut state = Box::new(RiscvCommunicationInterfaceState::new());
+        state.is_halted = halted;
+        RiscvCommunicationInterface::new(Box::new(TestDtm::new(memory)), Box::leak(state))
+    }
+
+    #[test]
+    fn halted_allowed_access_uses_system_memory_ap() {
+        let memory = Rc::new(RefCell::new(MemoryState {
+            value: 0x12345678,
+            ..Default::default()
+        }));
+        let mut interface = interface(true, memory.clone());
+
+        let value = interface.read_word_32(0xa00000).unwrap();
+        assert_eq!(value, 0x12345678);
+
+        interface.write_word_32(0xa00004, 0xdeadbeef).unwrap();
+        assert_eq!(memory.borrow().writes, [(0xa00004, 0xdeadbeef)]);
+    }
+
+    #[test]
+    fn running_or_out_of_range_access_preserves_legacy_route() {
+        let memory = Rc::new(RefCell::new(MemoryState::default()));
+        assert!(
+            interface(false, memory.clone())
+                .try_system_memory::<()>(0xa00000, 4, "running", |_| unreachable!())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            interface(true, memory)
+                .try_system_memory::<()>(0xa8defe, 4, "cross-boundary", |_| unreachable!())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn overflow_and_ap_errors_are_not_silently_retried() {
+        let memory = Rc::new(RefCell::new(MemoryState {
+            fail_write: true,
+            ..Default::default()
+        }));
+        let mut interface = interface(true, memory.clone());
+
+        let overflow = interface
+            .try_system_memory::<()>(u64::MAX - 1, 4, "overflow", |_| unreachable!())
+            .unwrap_err();
+        assert!(matches!(
+            overflow,
+            ProbeRsError::Riscv(RiscvError::SystemMemoryAddressOverflow { .. })
+        ));
+
+        let write = interface.write_word_32(0xa00000, 1).unwrap_err();
+        assert!(
+            matches!(
+                write,
+                ProbeRsError::Riscv(RiscvError::SystemMemoryAccess {
+                    operation: "write_word_32",
+                    ..
+                })
+            ),
+            "unexpected error: {write:?}"
+        );
+        assert!(memory.borrow().writes.is_empty());
     }
 }
 

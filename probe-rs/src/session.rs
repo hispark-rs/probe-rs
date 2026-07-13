@@ -26,7 +26,7 @@ use crate::{
         fake_probe::FakeProbe, list::Lister,
     },
 };
-use std::ops::DerefMut;
+use std::ops::{DerefMut, Range};
 use std::{fmt, sync::Arc, time::Duration};
 
 /// The `Session` struct represents an active debug session.
@@ -105,11 +105,18 @@ enum ArchitectureInterface {
     /// ARM DAP with RISC-V cores reachable via mem-AP (e.g. RP2350).
     ArmWithRiscv {
         arm: Box<dyn ArmDebugInterface + 'static>,
-        /// Per core_id: Some((ap, dm_base, state)) for RISC-V cores over mem-AP,
-        /// None otherwise. `dm_base` is the Debug Module base within the AP.
-        riscv_mem_ap_cores: Vec<Option<(FullyQualifiedApAddress, u64, RiscvDebugInterfaceState)>>,
+        /// Per-core transport state for RISC-V cores reached through a mem-AP.
+        riscv_mem_ap_cores: Vec<Option<RiscvMemApCore>>,
     },
     Jtag(Probe, Vec<JtagInterface>),
+}
+
+struct RiscvMemApCore {
+    dmi_ap: FullyQualifiedApAddress,
+    dm_base: u64,
+    system_memory_ap: Option<FullyQualifiedApAddress>,
+    system_memory_ranges: Vec<Range<u64>>,
+    state: RiscvDebugInterfaceState,
 }
 
 impl fmt::Debug for ArchitectureInterface {
@@ -140,10 +147,18 @@ impl ArchitectureInterface {
                 riscv_mem_ap_cores,
             } => {
                 let core_id = combined_state.id();
-                if let Some(Some((ap, dm_base, state))) = riscv_mem_ap_cores.get_mut(core_id) {
-                    let dtm = MemApDtm::new(arm.as_mut(), ap.clone(), *dm_base);
-                    let iface =
-                        RiscvCommunicationInterface::new(Box::new(dtm), &mut state.interface_state);
+                if let Some(Some(core)) = riscv_mem_ap_cores.get_mut(core_id) {
+                    let dtm = MemApDtm::new(
+                        arm.as_mut(),
+                        core.dmi_ap.clone(),
+                        core.dm_base,
+                        core.system_memory_ap.clone(),
+                        core.system_memory_ranges.clone(),
+                    );
+                    let iface = RiscvCommunicationInterface::new(
+                        Box::new(dtm),
+                        &mut core.state.interface_state,
+                    );
                     combined_state.attach_riscv(target, iface)
                 } else {
                     combined_state.attach_arm(target, arm)
@@ -386,19 +401,37 @@ impl Session {
         interface: Box<dyn ArmDebugInterface + 'static>,
     ) -> Result<ArchitectureInterface, Error> {
         use probe_rs_target::{Architecture, CoreAccessOptions};
-        let mut riscv_mem_ap_cores: Vec<
-            Option<(FullyQualifiedApAddress, u64, RiscvDebugInterfaceState)>,
-        > = target
+        let mut riscv_mem_ap_cores: Vec<Option<RiscvMemApCore>> = target
             .cores
             .iter()
             .map(|core| {
                 if core.core_type.architecture() == Architecture::Riscv {
-                    core.memory_ap().map(|ap| {
-                        let dm_base = match &core.core_access_options {
-                            CoreAccessOptions::Riscv(opts) => opts.dm_base,
-                            _ => 0,
+                    core.memory_ap().map(|dmi_ap| {
+                        let CoreAccessOptions::Riscv(options) = &core.core_access_options else {
+                            unreachable!()
                         };
-                        (ap, dm_base, RiscvDebugInterfaceState::new(Box::new(())))
+                        let system_memory_ap = options.system_memory_ap.as_ref().map(|ap| {
+                            let dp = DpAddress::Default;
+                            match ap {
+                                probe_rs_target::ApAddress::V1(ap_num) => {
+                                    FullyQualifiedApAddress::v1_with_dp(dp, *ap_num)
+                                }
+                                probe_rs_target::ApAddress::V2(ap_num) => {
+                                    use crate::architecture::arm::ApV2Address;
+                                    FullyQualifiedApAddress::v2_with_dp(
+                                        dp,
+                                        ApV2Address::new(*ap_num),
+                                    )
+                                }
+                            }
+                        });
+                        RiscvMemApCore {
+                            dmi_ap,
+                            dm_base: options.dm_base,
+                            system_memory_ap,
+                            system_memory_ranges: options.system_memory_ranges.clone(),
+                            state: RiscvDebugInterfaceState::new(Box::new(())),
+                        }
                     })
                 } else {
                     None
@@ -408,10 +441,18 @@ impl Session {
         let has_riscv_mem_ap = riscv_mem_ap_cores.iter().any(Option::is_some);
         if has_riscv_mem_ap {
             let mut arm = interface;
-            for (ap, dm_base, state) in riscv_mem_ap_cores.iter_mut().flatten() {
-                let dtm = MemApDtm::new(arm.as_mut(), ap.clone(), *dm_base);
-                let mut iface =
-                    RiscvCommunicationInterface::new(Box::new(dtm), &mut state.interface_state);
+            for core in riscv_mem_ap_cores.iter_mut().flatten() {
+                let dtm = MemApDtm::new(
+                    arm.as_mut(),
+                    core.dmi_ap.clone(),
+                    core.dm_base,
+                    core.system_memory_ap.clone(),
+                    core.system_memory_ranges.clone(),
+                );
+                let mut iface = RiscvCommunicationInterface::new(
+                    Box::new(dtm),
+                    &mut core.state.interface_state,
+                );
                 iface.enter_debug_mode().map_err(Error::Riscv)?;
             }
             Ok(ArchitectureInterface::ArmWithRiscv {
@@ -741,11 +782,17 @@ impl Session {
                 arm,
                 riscv_mem_ap_cores,
             } => {
-                if let Some(Some((ap, dm_base, state))) = riscv_mem_ap_cores.get_mut(core_id) {
-                    let dtm = MemApDtm::new(arm.as_mut(), ap.clone(), *dm_base);
+                if let Some(Some(core)) = riscv_mem_ap_cores.get_mut(core_id) {
+                    let dtm = MemApDtm::new(
+                        arm.as_mut(),
+                        core.dmi_ap.clone(),
+                        core.dm_base,
+                        core.system_memory_ap.clone(),
+                        core.system_memory_ranges.clone(),
+                    );
                     Ok(RiscvCommunicationInterface::new(
                         Box::new(dtm),
-                        &mut state.interface_state,
+                        &mut core.state.interface_state,
                     ))
                 } else {
                     Err(RiscvError::NoRiscvTarget.into())
