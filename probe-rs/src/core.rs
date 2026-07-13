@@ -245,7 +245,7 @@ impl<'probe> Core<'probe> {
         data: &[u8],
         allow_running_system_memory: bool,
     ) -> Result<(), Error> {
-        if !allow_running_system_memory || self.core_halted()? {
+        if !allow_running_system_memory {
             return self.write(address, data);
         }
 

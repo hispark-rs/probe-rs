@@ -614,13 +614,20 @@ impl<'state> RiscvCommunicationInterface<'state> {
             return Ok(false);
         };
 
-        memory
-            .write_8(address, data)
-            .map_err(|source| RiscvError::SystemMemoryAccess {
-                ap,
-                operation: "write_flash_buffer_while_running",
-                source,
-            })?;
+        let write_result = if address.is_multiple_of(4) && data.len().is_multiple_of(4) {
+            let words = data
+                .chunks_exact(4)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            memory.write_32(address, &words)
+        } else {
+            memory.write_8(address, data)
+        };
+        write_result.map_err(|source| RiscvError::SystemMemoryAccess {
+            ap,
+            operation: "write_flash_buffer_while_running",
+            source,
+        })?;
         Ok(true)
     }
 
@@ -3612,10 +3619,7 @@ mod direct_system_memory_tests {
                 .write_flash_buffer_while_running(0xa00000, &[1, 2, 3, 4])
                 .unwrap()
         );
-        assert_eq!(
-            memory.borrow().byte_writes,
-            [(0xa00000, 1), (0xa00001, 2), (0xa00002, 3), (0xa00003, 4)]
-        );
+        assert_eq!(memory.borrow().writes, [(0xa00000, 0x04030201)]);
 
         assert!(
             !running
@@ -3650,7 +3654,7 @@ mod direct_system_memory_tests {
                 ..
             })
         ));
-        assert_eq!(failing.borrow().byte_writes, [(0xa00000, 1)]);
+        assert_eq!(failing.borrow().writes, [(0xa00000, 0x04030201)]);
     }
 }
 
