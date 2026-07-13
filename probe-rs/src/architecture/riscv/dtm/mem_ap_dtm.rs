@@ -5,8 +5,8 @@
 //! address space.
 //! Each DMI register occupies 4 bytes, so address = register * 4
 
-use crate::architecture::arm::ArmError;
-use crate::architecture::arm::memory::ArmMemoryInterface;
+use crate::architecture::arm::communication_interface::ArmDebugInterface;
+use crate::architecture::arm::{ArmError, FullyQualifiedApAddress};
 use crate::architecture::riscv::communication_interface::RiscvError;
 use crate::architecture::riscv::dtm::DtmAccess;
 use crate::probe::queue::{DeferredResultIndex, DeferredResultSet};
@@ -23,7 +23,8 @@ enum DmiOp {
 
 /// DTM that performs DMI accesses via a CoreSight memory access port.
 pub struct MemApDtm<'state> {
-    memory: Box<dyn ArmMemoryInterface + 'state>,
+    interface: &'state mut dyn ArmDebugInterface,
+    dmi_ap: FullyQualifiedApAddress,
     /// Base address of the Debug Module within the mem-AP address space. The DMI
     /// register window starts here (RP235x = 0; HiSilicon WS63 = 0x8000_0000).
     dm_base: u64,
@@ -34,6 +35,7 @@ pub struct MemApDtm<'state> {
 impl fmt::Debug for MemApDtm<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemApDtm")
+            .field("dmi_ap", &self.dmi_ap)
             .field("pending_len", &self.pending.len())
             .finish()
     }
@@ -47,13 +49,18 @@ fn arm_error_to_riscv(e: ArmError) -> RiscvError {
 }
 
 impl<'state> MemApDtm<'state> {
-    /// Creates a DTM that performs DMI accesses via the given memory interface.
+    /// Creates a DTM that performs DMI accesses via the given ARM DAP.
     ///
     /// `dm_base` is the address of the Debug Module within the mem-AP address
     /// space (0 when the DM is at the AP base, as on RP235x).
-    pub fn new(memory: Box<dyn ArmMemoryInterface + 'state>, dm_base: u64) -> Self {
+    pub fn new(
+        interface: &'state mut dyn ArmDebugInterface,
+        dmi_ap: FullyQualifiedApAddress,
+        dm_base: u64,
+    ) -> Self {
         Self {
-            memory,
+            interface,
+            dmi_ap,
             dm_base,
             pending: Vec::new(),
             results: DeferredResultSet::new(),
@@ -102,19 +109,21 @@ impl DtmAccess for MemApDtm<'_> {
     }
 
     fn execute(&mut self) -> Result<(), RiscvError> {
+        let mut memory = self
+            .interface
+            .memory_interface(&self.dmi_ap)
+            .map_err(arm_error_to_riscv)?;
+        let dm_base = self.dm_base;
         for (index, op) in std::mem::take(&mut self.pending) {
             match op {
                 DmiOp::Read(addr) => {
-                    let byte_addr = self.dmi_register_to_ap_address(addr);
-                    let value = self
-                        .memory
-                        .read_word_32(byte_addr)
-                        .map_err(arm_error_to_riscv)?;
+                    let byte_addr = dm_base + addr * 4;
+                    let value = memory.read_word_32(byte_addr).map_err(arm_error_to_riscv)?;
                     self.results.push(&index, CommandResult::U32(value));
                 }
                 DmiOp::Write(addr, value) => {
-                    let byte_addr = self.dmi_register_to_ap_address(addr);
-                    self.memory
+                    let byte_addr = dm_base + addr * 4;
+                    memory
                         .write_word_32(byte_addr, value)
                         .map_err(arm_error_to_riscv)?;
                 }
@@ -143,7 +152,9 @@ impl DtmAccess for MemApDtm<'_> {
     fn read_with_timeout(&mut self, address: u64, _timeout: Duration) -> Result<u32, RiscvError> {
         // Memory-mapped path is synchronous; timeout is unused.
         let byte_addr = self.dmi_register_to_ap_address(address);
-        self.memory
+        self.interface
+            .memory_interface(&self.dmi_ap)
+            .map_err(arm_error_to_riscv)?
             .read_word_32(byte_addr)
             .map_err(arm_error_to_riscv)
     }
@@ -156,7 +167,9 @@ impl DtmAccess for MemApDtm<'_> {
     ) -> Result<Option<u32>, RiscvError> {
         // Memory-mapped path is synchronous; timeout is unused.
         let byte_addr = self.dmi_register_to_ap_address(address);
-        self.memory
+        self.interface
+            .memory_interface(&self.dmi_ap)
+            .map_err(arm_error_to_riscv)?
             .write_word_32(byte_addr, value)
             .map_err(arm_error_to_riscv)?;
         Ok(None)

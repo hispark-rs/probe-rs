@@ -141,8 +141,7 @@ impl ArchitectureInterface {
             } => {
                 let core_id = combined_state.id();
                 if let Some(Some((ap, dm_base, state))) = riscv_mem_ap_cores.get_mut(core_id) {
-                    let memory = arm.memory_interface(ap).map_err(Error::Arm)?;
-                    let dtm = MemApDtm::new(memory, *dm_base);
+                    let dtm = MemApDtm::new(arm.as_mut(), ap.clone(), *dm_base);
                     let iface =
                         RiscvCommunicationInterface::new(Box::new(dtm), &mut state.interface_state);
                     combined_state.attach_riscv(target, iface)
@@ -410,8 +409,7 @@ impl Session {
         if has_riscv_mem_ap {
             let mut arm = interface;
             for (ap, dm_base, state) in riscv_mem_ap_cores.iter_mut().flatten() {
-                let memory = arm.memory_interface(ap).map_err(Error::Arm)?;
-                let dtm = MemApDtm::new(memory, *dm_base);
+                let dtm = MemApDtm::new(arm.as_mut(), ap.clone(), *dm_base);
                 let mut iface =
                     RiscvCommunicationInterface::new(Box::new(dtm), &mut state.interface_state);
                 iface.enter_debug_mode().map_err(Error::Riscv)?;
@@ -744,8 +742,7 @@ impl Session {
                 riscv_mem_ap_cores,
             } => {
                 if let Some(Some((ap, dm_base, state))) = riscv_mem_ap_cores.get_mut(core_id) {
-                    let memory = arm.memory_interface(ap).map_err(Error::Arm)?;
-                    let dtm = MemApDtm::new(memory, *dm_base);
+                    let dtm = MemApDtm::new(arm.as_mut(), ap.clone(), *dm_base);
                     Ok(RiscvCommunicationInterface::new(
                         Box::new(dtm),
                         &mut state.interface_state,
