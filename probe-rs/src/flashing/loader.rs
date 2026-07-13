@@ -716,6 +716,7 @@ impl FlashLoader {
                 &mut options.progress,
                 options.keep_unwritten_bytes,
                 do_use_double_buffering,
+                options.enable_riscv_system_memory_double_buffering,
                 options.skip_erase || did_chip_erase,
                 options.verify,
             )?;

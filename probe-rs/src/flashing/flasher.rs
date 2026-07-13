@@ -47,6 +47,14 @@ impl Operation for Program {
     const NAME: &'static str = "Program";
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageBufferState {
+    Empty,
+    Ready,
+    Busy,
+    Consumed,
+}
+
 /// Type state for [`ActiveFlasher`] when the flash loader is initialized for verification.
 pub struct Verify;
 
@@ -406,6 +414,7 @@ impl Flasher {
         progress: &mut FlashProgress<'_>,
         restore_unwritten_bytes: bool,
         enable_double_buffering: bool,
+        enable_riscv_system_memory_double_buffering: bool,
         skip_erasing: bool,
         verify: bool,
     ) -> Result<(), FlashError> {
@@ -428,7 +437,12 @@ impl Flasher {
         }
 
         // Flash all necessary pages.
-        self.do_program(session, progress, enable_double_buffering)?;
+        self.do_program(
+            session,
+            progress,
+            enable_double_buffering,
+            enable_riscv_system_memory_double_buffering,
+        )?;
 
         if verify && !self.verify(session, progress, !restore_unwritten_bytes)? {
             return Err(FlashError::Verify);
@@ -542,7 +556,7 @@ impl Flasher {
                         );
 
                         // Transfer the bytes to RAM.
-                        let buffer_address = active.load_page_buffer(bytes, 0)?;
+                        let buffer_address = active.load_page_buffer(bytes, 0, false)?;
 
                         let result = active.call_function_and_wait(
                             &Registers {
@@ -682,10 +696,15 @@ impl Flasher {
         session: &mut Session,
         progress: &mut FlashProgress<'_>,
         enable_double_buffering: bool,
+        enable_riscv_system_memory_double_buffering: bool,
     ) -> Result<(), FlashError> {
         progress.started_programming();
         let program_result = if self.double_buffering_supported() && enable_double_buffering {
-            self.program_double_buffer(session, progress)
+            self.program_double_buffer(
+                session,
+                progress,
+                enable_riscv_system_memory_double_buffering,
+            )
         } else {
             self.program_simple(session, progress)
         };
@@ -739,6 +758,7 @@ impl Flasher {
         &mut self,
         session: &mut Session,
         progress: &mut FlashProgress<'_>,
+        enable_riscv_system_memory_double_buffering: bool,
     ) -> Result<(), FlashError> {
         let encoding = self.flash_algorithm.transfer_encoding;
         self.run_program(session, progress, |active, data| {
@@ -754,33 +774,49 @@ impl Flasher {
                 let flash_encoder = region.data.encoder(encoding, false);
 
                 let mut current_buf = 0;
-                let mut t = Instant::now();
-                let mut last_page_address = 0;
+                let mut buffer_states = [PageBufferState::Empty; 2];
+                let mut active_page: Option<(usize, u64, u64, Instant)> = None;
                 for page in flash_encoder.pages() {
+                    debug_assert!(matches!(
+                        buffer_states[current_buf],
+                        PageBufferState::Empty | PageBufferState::Consumed
+                    ));
                     // At the start of each loop cycle load the next page buffer into RAM.
                     let load_started = Instant::now();
-                    let buffer_address = active.load_page_buffer(page.data(), current_buf)?;
+                    let buffer_address = active.load_page_buffer(
+                        page.data(),
+                        current_buf,
+                        enable_riscv_system_memory_double_buffering,
+                    )?;
                     host_to_ram_elapsed += load_started.elapsed();
                     page_count += 1;
                     host_bytes += page.data().len();
+                    buffer_states[current_buf] = PageBufferState::Ready;
 
-                    // Then wait for the active RAM -> Flash copy process to finish.
-                    // Also check if it finished properly. If it didn't, return an error.
-                    active.wait_for_write_end(last_page_address)?;
-
-                    last_page_address = page.address();
-                    active
-                        .progress
-                        .page_programmed(page.size() as u64, t.elapsed());
-
-                    t = Instant::now();
+                    // The upload above overlaps the previous target-side page
+                    // operation. Do not reuse its buffer until the bounded wait
+                    // reports that the target consumed it.
+                    if let Some((buffer, address, size, started)) = active_page.take() {
+                        debug_assert_eq!(buffer_states[buffer], PageBufferState::Busy);
+                        active.wait_for_write_end(address)?;
+                        buffer_states[buffer] = PageBufferState::Consumed;
+                        active.progress.page_programmed(size, started.elapsed());
+                    }
 
                     // Start the next copy process.
+                    debug_assert_eq!(buffer_states[current_buf], PageBufferState::Ready);
                     active.start_program_page_with_buffer(
                         buffer_address,
                         page.address(),
                         page.size() as u64,
                     )?;
+                    buffer_states[current_buf] = PageBufferState::Busy;
+                    active_page = Some((
+                        current_buf,
+                        page.address(),
+                        page.size() as u64,
+                        Instant::now(),
+                    ));
 
                     // Swap the buffers
                     if current_buf == 1 {
@@ -790,7 +826,13 @@ impl Flasher {
                     }
                 }
 
-                active.wait_for_write_end(last_page_address)?;
+                if let Some((buffer, address, size, started)) = active_page.take() {
+                    debug_assert_eq!(buffer_states[buffer], PageBufferState::Busy);
+                    active.wait_for_write_end(address)?;
+                    buffer_states[buffer] = PageBufferState::Consumed;
+                    active.progress.page_programmed(size, started.elapsed());
+                    tracing::trace!(?buffer_states, "All double buffers reached a consumed state");
+                }
             }
             tracing::debug!(page_count, host_bytes, elapsed = ?host_to_ram_elapsed, "Host-to-RAM page loads completed");
             Ok(())
@@ -1224,6 +1266,7 @@ impl<O: Operation> ActiveFlasher<'_, '_, O> {
         &mut self,
         bytes: &[u8],
         buffer_number: usize,
+        allow_running_system_memory: bool,
     ) -> Result<u64, FlashError> {
         // Ensure the buffer number is valid, otherwise there is a bug somewhere
         // in the flashing code.
@@ -1235,13 +1278,18 @@ impl<O: Operation> ActiveFlasher<'_, '_, O> {
         );
 
         let buffer_address = self.flash_algorithm.page_buffers[buffer_number];
-        self.load_data(buffer_address, bytes)?;
+        self.load_data(buffer_address, bytes, allow_running_system_memory)?;
 
         Ok(buffer_address)
     }
 
     /// Transfers the buffer bytes to RAM.
-    fn load_data(&mut self, address: u64, bytes: &[u8]) -> Result<(), FlashError> {
+    fn load_data(
+        &mut self,
+        address: u64,
+        bytes: &[u8],
+        allow_running_system_memory: bool,
+    ) -> Result<(), FlashError> {
         tracing::debug!(
             "Loading {} bytes of data into RAM at address {:#010x}\n",
             bytes.len(),
@@ -1268,7 +1316,20 @@ impl<O: Operation> ActiveFlasher<'_, '_, O> {
             Cow::Owned(bytes)
         };
 
-        self.core.write(address, &bytes).map_err(FlashError::Core)?;
+        if let Err(error) =
+            self.core
+                .write_flash_buffer(address, &bytes, allow_running_system_memory)
+        {
+            if allow_running_system_memory
+                && let Err(halt_error) = self.core.halt(Duration::from_secs(1))
+            {
+                tracing::error!(
+                    ?halt_error,
+                    "Failed to halt after running flash-buffer upload error"
+                );
+            }
+            return Err(FlashError::Core(error));
+        }
 
         if let Some(t1) = t1 {
             tracing::info!(
@@ -1443,7 +1504,7 @@ impl ActiveFlasher<'_, '_, Program> {
         );
 
         // Transfer the bytes to RAM.
-        let begin_data = self.load_page_buffer(bytes, 0)?;
+        let begin_data = self.load_page_buffer(bytes, 0, false)?;
 
         self.start_program_page_with_buffer(begin_data, address, bytes.len() as u64)?;
         self.wait_for_write_end(address)?;

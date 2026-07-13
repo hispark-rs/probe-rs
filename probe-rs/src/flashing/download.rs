@@ -133,6 +133,12 @@ pub struct DownloadOptions<'p> {
     pub verify: bool,
     /// Disable double buffering when loading flash.
     pub disable_double_buffering: bool,
+    /// Experimentally allow a target-authorized RISC-V system Memory-AP to
+    /// upload flash page buffers while the hart is running.
+    ///
+    /// This is disabled by default and does not enable generic running-state
+    /// memory access.
+    pub enable_riscv_system_memory_double_buffering: bool,
     /// If there are multiple valid flash algorithms for a memory region, this list allows
     /// overriding the default selection.
     pub preferred_algos: Vec<String>,
