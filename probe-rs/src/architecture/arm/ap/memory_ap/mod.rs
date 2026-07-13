@@ -82,6 +82,13 @@ pub trait MemoryApType:
         data_size: DataSize,
     ) -> Result<(), ArmError>;
 
+    /// Set the address increment mode and return the previous mode.
+    fn set_address_increment<I: ApAccess>(
+        &mut self,
+        interface: &mut I,
+        address_increment: AddressIncrement,
+    ) -> Result<AddressIncrement, ArmError>;
+
     /// The current generic CSW (missing the memory AP specific fields).
     fn generic_status<I: ApAccess>(&mut self, interface: &mut I) -> Result<CSW, ArmError> {
         self.status(interface)?
@@ -280,6 +287,14 @@ impl MemoryApType for MemoryAp {
         data_size: DataSize,
     ) -> Result<(), ArmError> {
         mem_ap_forward!(self, try_set_datasize(interface, data_size))
+    }
+
+    fn set_address_increment<I: ApAccess>(
+        &mut self,
+        interface: &mut I,
+        address_increment: AddressIncrement,
+    ) -> Result<AddressIncrement, ArmError> {
+        mem_ap_forward!(self, set_address_increment(interface, address_increment))
     }
 
     fn status<I: ApAccess>(&mut self, interface: &mut I) -> Result<Self::CSW, ArmError> {

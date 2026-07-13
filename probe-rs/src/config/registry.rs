@@ -103,6 +103,7 @@ fn add_generic_targets(vec: &mut Vec<ChipFamily>) {
                         jtag_tap: None,
                         mem_ap: None,
                         dm_base: 0,
+                        dmi_repeated_write_batch_size: None,
                     }),
                 }],
                 memory_map: vec![],
@@ -134,6 +135,7 @@ fn add_generic_targets(vec: &mut Vec<ChipFamily>) {
                         jtag_tap: None,
                         mem_ap: None,
                         dm_base: 0,
+                        dmi_repeated_write_batch_size: None,
                     }),
                 }],
                 memory_map: vec![],
@@ -518,6 +520,26 @@ mod tests {
             "WS63 should resolve to a HiSilicon ARM debug sequence, got {:?}",
             target.debug_sequence
         );
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn repeated_dmi_writes_are_target_opt_in() {
+        use probe_rs_target::CoreAccessOptions;
+
+        let registry = Registry::from_builtin_families();
+        let ws63 = registry.get_target_by_name("WS63").unwrap();
+        let CoreAccessOptions::Riscv(ws63_options) = &ws63.cores[0].core_access_options else {
+            panic!("WS63 core is not RISC-V");
+        };
+        assert_eq!(ws63_options.dmi_repeated_write_batch_size, Some(64));
+
+        let generic = registry.get_target_by_name("riscv").unwrap();
+        let CoreAccessOptions::Riscv(generic_options) = &generic.cores[0].core_access_options
+        else {
+            panic!("generic RISC-V core is not RISC-V");
+        };
+        assert_eq!(generic_options.dmi_repeated_write_batch_size, None);
     }
 
     #[test]

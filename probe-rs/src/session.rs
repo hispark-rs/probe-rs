@@ -99,15 +99,21 @@ impl fmt::Debug for JtagInterface {
     }
 }
 
+struct RiscvMemApCore {
+    ap: FullyQualifiedApAddress,
+    dm_base: u64,
+    repeated_write_batch_size: Option<usize>,
+    state: RiscvDebugInterfaceState,
+}
+
 // TODO: this is somewhat messy because I omitted separating the Probe out of the ARM interface.
 enum ArchitectureInterface {
     Arm(Box<dyn ArmDebugInterface + 'static>),
     /// ARM DAP with RISC-V cores reachable via mem-AP (e.g. RP2350).
     ArmWithRiscv {
         arm: Box<dyn ArmDebugInterface + 'static>,
-        /// Per core_id: Some((ap, dm_base, state)) for RISC-V cores over mem-AP,
-        /// None otherwise. `dm_base` is the Debug Module base within the AP.
-        riscv_mem_ap_cores: Vec<Option<(FullyQualifiedApAddress, u64, RiscvDebugInterfaceState)>>,
+        /// Per-core RISC-V state for cores reached through a mem-AP.
+        riscv_mem_ap_cores: Vec<Option<RiscvMemApCore>>,
     },
     Jtag(Probe, Vec<JtagInterface>),
 }
@@ -140,11 +146,13 @@ impl ArchitectureInterface {
                 riscv_mem_ap_cores,
             } => {
                 let core_id = combined_state.id();
-                if let Some(Some((ap, dm_base, state))) = riscv_mem_ap_cores.get_mut(core_id) {
-                    let memory = arm.memory_interface(ap).map_err(Error::Arm)?;
-                    let dtm = MemApDtm::new(memory, *dm_base);
-                    let iface =
-                        RiscvCommunicationInterface::new(Box::new(dtm), &mut state.interface_state);
+                if let Some(Some(core)) = riscv_mem_ap_cores.get_mut(core_id) {
+                    let memory = arm.memory_interface(&core.ap).map_err(Error::Arm)?;
+                    let dtm = MemApDtm::new(memory, core.dm_base, core.repeated_write_batch_size);
+                    let iface = RiscvCommunicationInterface::new(
+                        Box::new(dtm),
+                        &mut core.state.interface_state,
+                    );
                     combined_state.attach_riscv(target, iface)
                 } else {
                     combined_state.attach_arm(target, arm)
@@ -387,19 +395,24 @@ impl Session {
         interface: Box<dyn ArmDebugInterface + 'static>,
     ) -> Result<ArchitectureInterface, Error> {
         use probe_rs_target::{Architecture, CoreAccessOptions};
-        let mut riscv_mem_ap_cores: Vec<
-            Option<(FullyQualifiedApAddress, u64, RiscvDebugInterfaceState)>,
-        > = target
+        let mut riscv_mem_ap_cores: Vec<Option<RiscvMemApCore>> = target
             .cores
             .iter()
             .map(|core| {
                 if core.core_type.architecture() == Architecture::Riscv {
                     core.memory_ap().map(|ap| {
-                        let dm_base = match &core.core_access_options {
-                            CoreAccessOptions::Riscv(opts) => opts.dm_base,
-                            _ => 0,
+                        let (dm_base, batch_size) = match &core.core_access_options {
+                            CoreAccessOptions::Riscv(opts) => {
+                                (opts.dm_base, opts.dmi_repeated_write_batch_size)
+                            }
+                            _ => (0, None),
                         };
-                        (ap, dm_base, RiscvDebugInterfaceState::new(Box::new(())))
+                        RiscvMemApCore {
+                            ap,
+                            dm_base,
+                            repeated_write_batch_size: batch_size,
+                            state: RiscvDebugInterfaceState::new(Box::new(())),
+                        }
                     })
                 } else {
                     None
@@ -409,11 +422,13 @@ impl Session {
         let has_riscv_mem_ap = riscv_mem_ap_cores.iter().any(Option::is_some);
         if has_riscv_mem_ap {
             let mut arm = interface;
-            for (ap, dm_base, state) in riscv_mem_ap_cores.iter_mut().flatten() {
-                let memory = arm.memory_interface(ap).map_err(Error::Arm)?;
-                let dtm = MemApDtm::new(memory, *dm_base);
-                let mut iface =
-                    RiscvCommunicationInterface::new(Box::new(dtm), &mut state.interface_state);
+            for core in riscv_mem_ap_cores.iter_mut().flatten() {
+                let memory = arm.memory_interface(&core.ap).map_err(Error::Arm)?;
+                let dtm = MemApDtm::new(memory, core.dm_base, core.repeated_write_batch_size);
+                let mut iface = RiscvCommunicationInterface::new(
+                    Box::new(dtm),
+                    &mut core.state.interface_state,
+                );
                 iface.enter_debug_mode().map_err(Error::Riscv)?;
             }
             Ok(ArchitectureInterface::ArmWithRiscv {
@@ -743,12 +758,12 @@ impl Session {
                 arm,
                 riscv_mem_ap_cores,
             } => {
-                if let Some(Some((ap, dm_base, state))) = riscv_mem_ap_cores.get_mut(core_id) {
-                    let memory = arm.memory_interface(ap).map_err(Error::Arm)?;
-                    let dtm = MemApDtm::new(memory, *dm_base);
+                if let Some(Some(core)) = riscv_mem_ap_cores.get_mut(core_id) {
+                    let memory = arm.memory_interface(&core.ap).map_err(Error::Arm)?;
+                    let dtm = MemApDtm::new(memory, core.dm_base, core.repeated_write_batch_size);
                     Ok(RiscvCommunicationInterface::new(
                         Box::new(dtm),
-                        &mut state.interface_state,
+                        &mut core.state.interface_state,
                     ))
                 } else {
                     Err(RiscvError::NoRiscvTarget.into())

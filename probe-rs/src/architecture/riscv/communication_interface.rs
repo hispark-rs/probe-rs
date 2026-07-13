@@ -2114,8 +2114,27 @@ impl<'state> RiscvCommunicationInterface<'state> {
         abstractauto.set_autoexecdata(1);
         self.write_dm_register(abstractauto)?;
 
-        for value in &data[1..] {
-            self.write_dm_register(Data0((*value).into()))?;
+        if let Some(batch_size) = self.dtm.repeated_write_batch_size() {
+            let values = data[1..]
+                .iter()
+                .map(|value| (*value).into())
+                .collect::<Vec<u32>>();
+            // A memory-mapped DMI transport can batch writes to DATA0, but the
+            // debug module still needs time to execute each autoexec command.
+            // The target-declared bound and per-batch status check provide the
+            // backpressure contract.
+            for chunk in values.chunks(batch_size) {
+                self.dtm.write_repeated_with_timeout(
+                    Data0::ADDRESS_OFFSET,
+                    chunk,
+                    RISCV_TIMEOUT,
+                )?;
+                self.wait_for_abstract_idle(Duration::from_millis(100))?;
+            }
+        } else {
+            for value in &data[1..] {
+                self.write_dm_register(Data0((*value).into()))?;
+            }
         }
 
         self.wait_for_abstract_idle(Duration::from_millis(100))

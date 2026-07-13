@@ -218,6 +218,7 @@ fn create_core(processor: &Processor) -> Result<ProbeCore> {
                 jtag_tap: None,
                 mem_ap: None,
                 dm_base: 0,
+                dmi_repeated_write_batch_size: None,
             }),
             Architecture::Xtensa => {
                 CoreAccessOptions::Xtensa(XtensaCoreAccessOptions { jtag_tap: None })

@@ -11,6 +11,14 @@ use std::time::Duration;
 
 /// Debug Transport Module (DTM) access abstraction
 pub trait DtmAccess: fmt::Debug {
+    /// Maximum safe repeated-write batch size for DATA0 autoexec.
+    ///
+    /// `None` means the transport or target has not declared and verified this
+    /// capability, so callers must retain individual DMI writes.
+    fn repeated_write_batch_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Perform interface-specific initialisation upon attaching.
     fn init(&mut self) -> Result<(), RiscvError> {
         Ok(())
@@ -61,6 +69,22 @@ pub trait DtmAccess: fmt::Debug {
         value: u32,
         timeout: Duration,
     ) -> Result<Option<u32>, RiscvError>;
+
+    /// Write multiple values to the same DMI register.
+    ///
+    /// Transports that can stream repeated writes should override this method.
+    /// The default preserves the semantics of individual writes.
+    fn write_repeated_with_timeout(
+        &mut self,
+        address: u64,
+        values: &[u32],
+        timeout: Duration,
+    ) -> Result<(), RiscvError> {
+        for &value in values {
+            self.write_with_timeout(address, value, timeout)?;
+        }
+        Ok(())
+    }
 
     /// Returns an idcode used for chip detection
     fn read_idcode(&mut self) -> Result<Option<u32>, DebugProbeError>;

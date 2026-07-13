@@ -27,6 +27,7 @@ pub struct MemApDtm<'state> {
     /// Base address of the Debug Module within the mem-AP address space. The DMI
     /// register window starts here (RP235x = 0; HiSilicon WS63 = 0x8000_0000).
     dm_base: u64,
+    repeated_write_batch_size: Option<usize>,
     pending: Vec<(DeferredResultIndex, DmiOp)>,
     results: DeferredResultSet<CommandResult>,
 }
@@ -51,10 +52,15 @@ impl<'state> MemApDtm<'state> {
     ///
     /// `dm_base` is the address of the Debug Module within the mem-AP address
     /// space (0 when the DM is at the AP base, as on RP235x).
-    pub fn new(memory: Box<dyn ArmMemoryInterface + 'state>, dm_base: u64) -> Self {
+    pub fn new(
+        memory: Box<dyn ArmMemoryInterface + 'state>,
+        dm_base: u64,
+        repeated_write_batch_size: Option<usize>,
+    ) -> Self {
         Self {
             memory,
             dm_base,
+            repeated_write_batch_size: repeated_write_batch_size.filter(|size| *size > 0),
             pending: Vec::new(),
             results: DeferredResultSet::new(),
         }
@@ -67,6 +73,10 @@ impl<'state> MemApDtm<'state> {
 }
 
 impl DtmAccess for MemApDtm<'_> {
+    fn repeated_write_batch_size(&self) -> Option<usize> {
+        self.repeated_write_batch_size
+    }
+
     fn init(&mut self) -> Result<(), RiscvError> {
         // No DTM control register; memory-mapped path is synchronous.
         Ok(())
@@ -160,6 +170,22 @@ impl DtmAccess for MemApDtm<'_> {
             .write_word_32(byte_addr, value)
             .map_err(arm_error_to_riscv)?;
         Ok(None)
+    }
+
+    fn write_repeated_with_timeout(
+        &mut self,
+        address: u64,
+        values: &[u32],
+        _timeout: Duration,
+    ) -> Result<(), RiscvError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        let byte_addr = self.dmi_register_to_ap_address(address);
+        self.memory
+            .write_repeated_32(byte_addr, values)
+            .map_err(arm_error_to_riscv)
     }
 
     fn read_idcode(&mut self) -> Result<Option<u32>, DebugProbeError> {

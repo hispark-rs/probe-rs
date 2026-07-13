@@ -13,6 +13,17 @@ pub use romtable::{Component, ComponentId, CoresightComponent, PeripheralType, R
 /// Trait for accessing memory behind a memory access port,
 /// as defined in the ARM Debug Interface Specification.
 pub trait ArmMemoryInterface: MemoryInterface<ArmError> {
+    /// Write multiple 32-bit values to the same address.
+    ///
+    /// The default uses individual writes. ADI memory interfaces override this
+    /// to use a repeated DRW transfer with address increment disabled.
+    fn write_repeated_32(&mut self, address: u64, values: &[u32]) -> Result<(), ArmError> {
+        for &value in values {
+            self.write_word_32(address, value)?;
+        }
+        Ok(())
+    }
+
     /// The underlying MemoryAp address.
     fn fully_qualified_address(&self) -> FullyQualifiedApAddress;
 

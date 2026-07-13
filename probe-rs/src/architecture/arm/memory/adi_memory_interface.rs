@@ -3,7 +3,7 @@ use crate::{
     architecture::arm::{
         ArmDebugInterface, ArmError, DapAccess, FullyQualifiedApAddress,
         ap::{
-            AccessPortType, ApAccess, CSW, DataSize,
+            AccessPortType, AddressIncrement, ApAccess, CSW, DataSize,
             memory_ap::{MemoryAp, MemoryApType},
         },
         memory::ArmMemoryInterface,
@@ -39,6 +39,36 @@ where
             interface,
             memory_ap,
         })
+    }
+
+    fn write_repeated_32_inner(&mut self, address: u64, values: &[u32]) -> Result<(), ArmError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        if let [value] = values {
+            return self.write_word_32(address, *value);
+        }
+        if !address.is_multiple_of(4) {
+            return Err(ArmError::alignment_error(address, 4));
+        }
+
+        self.memory_ap
+            .try_set_datasize(self.interface, DataSize::U32)?;
+        let previous_increment = self
+            .memory_ap
+            .set_address_increment(self.interface, AddressIncrement::Off)?;
+
+        let transfer = (|| {
+            self.memory_ap.set_target_address(self.interface, address)?;
+            self.memory_ap.write_data(self.interface, values)?;
+            self.interface.flush()
+        })();
+        let restore = self
+            .memory_ap
+            .set_address_increment(self.interface, previous_increment)
+            .map(|_| ());
+
+        transfer.and(restore)
     }
 }
 
@@ -485,6 +515,10 @@ impl<APA> ArmMemoryInterface for ADIMemoryInterface<'_, APA>
 where
     APA: ApAccess + ArmDebugInterface,
 {
+    fn write_repeated_32(&mut self, address: u64, values: &[u32]) -> Result<(), ArmError> {
+        self.write_repeated_32_inner(address, values)
+    }
+
     fn base_address(&mut self) -> Result<u64, ArmError> {
         self.memory_ap.base_address(self.interface)
     }
@@ -598,6 +632,31 @@ mod tests {
                 .unwrap_or_else(|_| panic!("write_word_32 failed, address = {address}"));
             assert_eq!(mi.mock_memory(), expected.as_slice(), "address = {address}");
         }
+    }
+
+    #[test]
+    fn write_repeated_32_keeps_address_and_restores_increment() {
+        let mut mock = MockMemoryAp::with_pattern_and_size(256);
+        let mut mi = ADIMemoryInterface::new_mock(&mut mock);
+        let original = Vec::from(mi.mock_memory());
+
+        mi.write_repeated_32_inner(8, &[0x1111_1111, 0x2222_2222, 0x3333_3333])
+            .expect("repeated write failed");
+        mi.write_32(12, &[0x4444_4444, 0x5555_5555])
+            .expect("ordinary write after repeated write failed");
+
+        let mut expected = original;
+        expected[8..12].copy_from_slice(&0x3333_3333_u32.to_le_bytes());
+        expected[12..16].copy_from_slice(&0x4444_4444_u32.to_le_bytes());
+        expected[16..20].copy_from_slice(&0x5555_5555_u32.to_le_bytes());
+        assert_eq!(mi.mock_memory(), expected);
+    }
+
+    #[test]
+    fn write_repeated_32_rejects_unaligned_address() {
+        let mut mock = MockMemoryAp::with_pattern_and_size(256);
+        let mut mi = ADIMemoryInterface::new_mock(&mut mock);
+        assert!(mi.write_repeated_32_inner(3, &[1, 2]).is_err());
     }
 
     #[test]

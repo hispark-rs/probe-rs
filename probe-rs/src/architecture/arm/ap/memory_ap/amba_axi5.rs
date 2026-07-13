@@ -71,6 +71,23 @@ impl super::MemoryApType for AmbaAxi5 {
         Ok(())
     }
 
+    fn set_address_increment<P: ApAccess + ?Sized>(
+        &mut self,
+        probe: &mut P,
+        address_increment: AddressIncrement,
+    ) -> Result<AddressIncrement, ArmError> {
+        let previous = self.csw.AddrInc;
+        if previous != address_increment {
+            let csw = CSW {
+                AddrInc: address_increment,
+                ..self.csw
+            };
+            probe.write_ap_register(self, csw)?;
+            self.csw = csw;
+        }
+        Ok(previous)
+    }
+
     fn has_large_address_extension(&self) -> bool {
         self.cfg.LA
     }

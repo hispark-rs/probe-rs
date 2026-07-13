@@ -243,6 +243,12 @@ pub struct RiscvCoreAccessOptions {
     /// is mapped at a fixed offset set this — e.g. HiSilicon WS63 (`0x8000_0000`).
     #[serde(default)]
     pub dm_base: u64,
+
+    /// Maximum number of repeated DATA0 writes issued before checking the
+    /// abstract command status. Unset keeps the transport's conservative
+    /// one-write-at-a-time behavior.
+    #[serde(default)]
+    pub dmi_repeated_write_batch_size: Option<usize>,
 }
 
 /// The data required to access an Xtensa core
