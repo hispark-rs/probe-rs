@@ -8,6 +8,10 @@ variants:
       hart_id: 0
       mem_ap: !v1 0
       dm_base: 2147483648
+      system_memory_ap: !v1 1
+      system_memory_ranges:
+      - start: 0xa00000
+        end: 0xa8df00
   memory_map:
   - !Ram
     range:
