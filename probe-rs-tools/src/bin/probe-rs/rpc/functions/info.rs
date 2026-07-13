@@ -10,7 +10,7 @@ use probe_rs::{
     architecture::{
         arm::{
             self, ApAddress, ApV2Address, ArmDebugInterface,
-            ap::{ApClass, ApRegister, IDR},
+            ap::{ApClass, ApRegister, BASE, CFG, CSW, IDR},
             component::Scs,
             dp::{self, Ctrl, DLPIDR, DPIDR, DpRegister, TARGETID},
             memory::{
@@ -251,6 +251,10 @@ pub struct DebugPortInfo {
 pub enum ApInfo {
     MemoryAp {
         ap_addr: FullyQualifiedApAddress,
+        idr: u32,
+        base: u32,
+        cfg: u32,
+        csw: u32,
         component_tree: ComponentTreeNode,
     },
     ApV2Root {
@@ -580,7 +584,13 @@ async fn show_arm_info(
     .await?;
 
     if dp_info.version != dp::DebugPortVersion::DPv3 {
-        let access_ports = interface.access_ports(dp)?;
+        // Verbose discovery must not assume APs are contiguous. The normal
+        // session path stops at the first missing ADIv5 AP for speed, but this
+        // diagnostic path deliberately scans the complete APSEL range.
+        let access_ports = (0..=u8::MAX)
+            .map(|ap| arm::FullyQualifiedApAddress::v1_with_dp(dp, ap))
+            .filter(|ap| arm::ap::v1::access_port_is_valid(interface, ap).is_some())
+            .collect::<Vec<_>>();
         for ap_address in access_ports {
             match ap_address.ap() {
                 ApAddress::V1(_) => {
@@ -588,6 +598,10 @@ async fn show_arm_info(
                     let idr: IDR = raw_idr.try_into()?;
 
                     let ap_info = if idr.CLASS == ApClass::MemAp {
+                        let raw_base =
+                            interface.read_raw_ap_register(&ap_address, BASE::ADDRESS)?;
+                        let raw_cfg = interface.read_raw_ap_register(&ap_address, CFG::ADDRESS)?;
+                        let raw_csw = interface.read_raw_ap_register(&ap_address, CSW::ADDRESS)?;
                         let mut ap_nodes = ComponentTreeNode::new(format!(
                             "{} MemoryAP ({:?})",
                             ap_address.ap_v1()?,
@@ -601,6 +615,10 @@ async fn show_arm_info(
                                 dp: ap_address.dp().into(),
                                 ap: ap_address.ap().to_string(),
                             },
+                            idr: raw_idr,
+                            base: raw_base,
+                            cfg: raw_cfg,
+                            csw: raw_csw,
                             component_tree: ap_nodes,
                         }
                     } else {

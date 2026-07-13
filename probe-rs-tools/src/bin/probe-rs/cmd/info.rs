@@ -285,9 +285,16 @@ impl Display for DebugPortInfo {
                 match ap {
                     ApInfo::MemoryAp {
                         ap_addr,
+                        idr,
+                        base,
+                        cfg,
+                        csw,
                         component_tree,
                     } => {
-                        let mut ap_root = Tree::new(format!("{} MemoryAP", ap_addr.ap));
+                        let mut ap_root = Tree::new(format!(
+                            "{} MemoryAP (IDR={idr:#010x}, BASE={base:#010x}, CFG={cfg:#010x}, CSW={csw:#010x})",
+                            ap_addr.ap
+                        ));
 
                         ap_root.push(component_tree);
 

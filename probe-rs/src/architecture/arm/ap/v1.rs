@@ -29,7 +29,7 @@ pub fn access_port_is_valid<AP>(
     access_port: &FullyQualifiedApAddress,
 ) -> Option<IDR>
 where
-    AP: DapAccess,
+    AP: DapAccess + ?Sized,
 {
     let idr_result: Result<IDR, _> = debug_port
         .read_raw_ap_register(access_port, IDR::ADDRESS)
