@@ -22,6 +22,11 @@ pub struct BinaryDownloadOptions {
     /// download fails during programming with timeout errors, try this option.
     #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
     pub disable_double_buffering: bool,
+    /// Experimentally use a target-authorized RISC-V system Memory-AP for
+    /// running flash page-buffer uploads. This does not affect RTT, live
+    /// variables, MMIO, or ordinary debugger memory access.
+    #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    pub enable_riscv_system_memory_double_buffering: bool,
     /// Enable this flag to restore all bytes erased in the sector erase but not overwritten by any page.
     #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
     pub restore_unwritten: bool,

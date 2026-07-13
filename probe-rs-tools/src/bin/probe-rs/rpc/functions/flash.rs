@@ -38,6 +38,10 @@ pub struct DownloadOptions {
     pub verify: bool,
     /// Disable double buffering when loading flash.
     pub disable_double_buffering: bool,
+    /// Experimentally use an explicitly target-authorized RISC-V system
+    /// Memory-AP for running flash page-buffer uploads.
+    #[serde(default)]
+    pub enable_riscv_system_memory_double_buffering: bool,
     /// If there are multiple valid flash algorithms for a memory region, this list allows
     /// overriding the default selection.
     pub preferred_algos: Vec<String>,
@@ -121,6 +125,8 @@ impl FlashRequest {
         options.preverify = false;
         options.verify = self.options.verify;
         options.disable_double_buffering = self.options.disable_double_buffering;
+        options.enable_riscv_system_memory_double_buffering =
+            self.options.enable_riscv_system_memory_double_buffering;
         options.preferred_algos = self.options.preferred_algos.clone();
 
         options

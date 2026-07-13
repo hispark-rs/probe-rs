@@ -300,6 +300,7 @@ async fn main_try(args: Vec<OsString>, config: Config, offset: UtcOffset) -> Res
         let download_options = BinaryDownloadOptions {
             disable_progressbars: opt.disable_progressbars,
             disable_double_buffering: config.flashing.disable_double_buffering,
+            enable_riscv_system_memory_double_buffering: false,
             restore_unwritten: config.flashing.restore_unwritten_bytes,
             flash_layout_output_path: None,
             preverify: config.flashing.preverify,

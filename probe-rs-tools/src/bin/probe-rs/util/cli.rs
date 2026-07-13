@@ -392,6 +392,8 @@ pub async fn flash(
         skip_erase: false,
         verify: download_options.verify,
         disable_double_buffering: download_options.disable_double_buffering,
+        enable_riscv_system_memory_double_buffering: download_options
+            .enable_riscv_system_memory_double_buffering,
         preferred_algos: download_options.prefer_flash_algorithm,
     };
 
