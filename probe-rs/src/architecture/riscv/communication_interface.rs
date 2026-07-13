@@ -3316,8 +3316,8 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
 mod direct_system_memory_tests {
     use super::*;
     use crate::CoreStatus;
-    use crate::architecture::arm::ap::CSW;
     use crate::architecture::arm::communication_interface::ArmDebugInterface;
+    use crate::architecture::arm::{DapError, ap::CSW};
     use crate::probe::queue::{DeferredResultIndex, DeferredResultSet};
     use crate::probe::{CommandResult, DebugProbeError};
     use std::cell::RefCell;
@@ -3368,7 +3368,7 @@ mod direct_system_memory_tests {
             for (index, value) in data.iter().enumerate() {
                 state.writes.push((address + index as u64 * 4, *value));
                 if state.fail_after_first_write {
-                    return Err(ArmError::NoArmTarget);
+                    return Err(ArmError::Dap(DapError::NoAcknowledge));
                 }
             }
             Ok(())
@@ -3383,7 +3383,7 @@ mod direct_system_memory_tests {
             for (index, value) in data.iter().enumerate() {
                 state.byte_writes.push((address + index as u64, *value));
                 if state.fail_after_first_write {
-                    return Err(ArmError::NoArmTarget);
+                    return Err(ArmError::Dap(DapError::NoAcknowledge));
                 }
             }
             Ok(())
@@ -3651,6 +3651,7 @@ mod direct_system_memory_tests {
             error,
             ProbeRsError::Riscv(RiscvError::SystemMemoryAccess {
                 operation: "write_flash_buffer_while_running",
+                source: ArmError::Dap(DapError::NoAcknowledge),
                 ..
             })
         ));
