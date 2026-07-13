@@ -477,6 +477,16 @@ impl<'state, X: XlenMode> RiscvCore<'state, X> {
 // ── CoreInterface implementation ──────────────────────────────────────────────
 
 impl<X: XlenMode> CoreInterface for RiscvCore<'_, X> {
+    fn write_flash_buffer_while_running(
+        &mut self,
+        address: u64,
+        data: &[u8],
+    ) -> Result<bool, Error> {
+        self.interface
+            .write_flash_buffer_while_running(address, data)
+            .map_err(Into::into)
+    }
+
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
         self.interface.wait_for_core_halted(timeout)?;
         self.on_halted()?;

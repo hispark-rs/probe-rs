@@ -36,6 +36,17 @@ pub struct CoreInformation {
 
 /// A generic interface to control a MCU core.
 pub trait CoreInterface: MemoryInterface {
+    /// Write a flash page buffer through a target-authorized running-state
+    /// transport. The default implementation reports that no such transport is
+    /// available; ordinary memory accesses must not call this method.
+    fn write_flash_buffer_while_running(
+        &mut self,
+        _address: u64,
+        _data: &[u8],
+    ) -> Result<bool, Error> {
+        Ok(false)
+    }
+
     /// Wait until the core is halted. If the core does not halt on its own,
     /// a [`DebugProbeError::Timeout`](crate::probe::DebugProbeError::Timeout) error will be returned.
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error>;
@@ -220,6 +231,44 @@ impl<'probe> Core<'probe> {
             name,
             target,
             inner: Box::new(core),
+        }
+    }
+
+    /// Write a flash page buffer while the core may be running.
+    ///
+    /// This is intentionally crate-private and requires both a target
+    /// capability and an explicit flash-download opt-in. It is not used by the
+    /// generic [`MemoryInterface`] implementation.
+    pub(crate) fn write_flash_buffer(
+        &mut self,
+        address: u64,
+        data: &[u8],
+        allow_running_system_memory: bool,
+    ) -> Result<(), Error> {
+        if !allow_running_system_memory || self.core_halted()? {
+            return self.write(address, data);
+        }
+
+        let CoreAccessOptions::Riscv(options) = &self.target.cores[self.id].core_access_options
+        else {
+            return Err(Error::Other(
+                "running flash-buffer system-memory access is only supported for RISC-V cores"
+                    .to_string(),
+            ));
+        };
+        if !options.system_memory_flash_buffers_while_running {
+            return Err(Error::Other(
+                "target does not authorize running flash-buffer system-memory access".to_string(),
+            ));
+        }
+
+        if self.inner.write_flash_buffer_while_running(address, data)? {
+            Ok(())
+        } else {
+            Err(Error::Other(format!(
+                "running flash buffer {address:#010x}..{:#010x} is outside the configured system-memory AP range",
+                address.saturating_add(data.len() as u64)
+            )))
         }
     }
 

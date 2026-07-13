@@ -586,6 +586,44 @@ impl<'state> RiscvCommunicationInterface<'state> {
             .map_err(Into::into)
     }
 
+    /// Write an explicitly authorized flash page buffer while the hart runs.
+    ///
+    /// Unlike `try_system_memory`, this entry point is write-only and does not
+    /// consult the halted state. Its only caller is the flash loader's explicit
+    /// experimental double-buffer path.
+    pub(crate) fn write_flash_buffer_while_running(
+        &mut self,
+        address: u64,
+        data: &[u8],
+    ) -> Result<bool, ProbeRsError> {
+        if data.is_empty() {
+            return Ok(true);
+        }
+        let size =
+            u64::try_from(data.len()).map_err(|_| RiscvError::SystemMemoryAddressOverflow {
+                address,
+                size: u64::MAX,
+            })?;
+        let Some(ap) = self.dtm.system_memory_ap().cloned() else {
+            return Ok(false);
+        };
+        address
+            .checked_add(size)
+            .ok_or(RiscvError::SystemMemoryAddressOverflow { address, size })?;
+        let Some(mut memory) = self.dtm.system_memory_interface(address, size)? else {
+            return Ok(false);
+        };
+
+        memory
+            .write_8(address, data)
+            .map_err(|source| RiscvError::SystemMemoryAccess {
+                ap,
+                operation: "write_flash_buffer_while_running",
+                source,
+            })?;
+        Ok(true)
+    }
+
     /// Select current hart
     pub fn select_hart(&mut self, hart: u32) -> Result<(), RiscvError> {
         if !self.hart_enabled(hart) {
@@ -3282,6 +3320,7 @@ mod direct_system_memory_tests {
     struct MemoryState {
         value: u32,
         writes: Vec<(u64, u32)>,
+        byte_writes: Vec<(u64, u8)>,
         fail_after_first_write: bool,
     }
 
@@ -3332,8 +3371,15 @@ mod direct_system_memory_tests {
             unreachable!()
         }
 
-        fn write_8(&mut self, _address: u64, _data: &[u8]) -> Result<(), ArmError> {
-            unreachable!()
+        fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), ArmError> {
+            let mut state = self.state.borrow_mut();
+            for (index, value) in data.iter().enumerate() {
+                state.byte_writes.push((address + index as u64, *value));
+                if state.fail_after_first_write {
+                    return Err(ArmError::NoArmTarget);
+                }
+            }
+            Ok(())
         }
 
         fn supports_8bit_transfers(&self) -> Result<bool, ArmError> {
@@ -3372,6 +3418,7 @@ mod direct_system_memory_tests {
         ap: FullyQualifiedApAddress,
         allowed: Range<u64>,
         state: Rc<RefCell<MemoryState>>,
+        configured: bool,
         results: DeferredResultSet<CommandResult>,
     }
 
@@ -3381,6 +3428,7 @@ mod direct_system_memory_tests {
                 ap: FullyQualifiedApAddress::v1_with_default_dp(1),
                 allowed: 0xa00000..0xa8df00,
                 state,
+                configured: true,
                 results: DeferredResultSet::new(),
             }
         }
@@ -3388,7 +3436,7 @@ mod direct_system_memory_tests {
 
     impl DtmAccess for TestDtm {
         fn system_memory_ap(&self) -> Option<&FullyQualifiedApAddress> {
-            Some(&self.ap)
+            self.configured.then_some(&self.ap)
         }
 
         fn system_memory_interface(
@@ -3476,6 +3524,16 @@ mod direct_system_memory_tests {
         RiscvCommunicationInterface::new(Box::new(TestDtm::new(memory)), Box::leak(state))
     }
 
+    fn interface_without_system_ap(
+        memory: Rc<RefCell<MemoryState>>,
+    ) -> RiscvCommunicationInterface<'static> {
+        let mut state = Box::new(RiscvCommunicationInterfaceState::new());
+        state.is_halted = false;
+        let mut dtm = TestDtm::new(memory);
+        dtm.configured = false;
+        RiscvCommunicationInterface::new(Box::new(dtm), Box::leak(state))
+    }
+
     #[test]
     fn halted_allowed_access_uses_system_memory_ap() {
         let memory = Rc::new(RefCell::new(MemoryState {
@@ -3536,6 +3594,63 @@ mod direct_system_memory_tests {
             "unexpected error: {write:?}"
         );
         assert_eq!(memory.borrow().writes, [(0xa00000, 1)]);
+    }
+
+    #[test]
+    fn running_flash_buffer_entry_is_explicit_bounded_and_never_retried() {
+        let memory = Rc::new(RefCell::new(MemoryState::default()));
+        let mut running = interface(false, memory.clone());
+
+        assert!(
+            running
+                .try_system_memory::<()>(0xa00000, 4, "ordinary", |_| unreachable!())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            running
+                .write_flash_buffer_while_running(0xa00000, &[1, 2, 3, 4])
+                .unwrap()
+        );
+        assert_eq!(
+            memory.borrow().byte_writes,
+            [(0xa00000, 1), (0xa00001, 2), (0xa00002, 3), (0xa00003, 4)]
+        );
+
+        assert!(
+            !running
+                .write_flash_buffer_while_running(0xa8defe, &[1, 2, 3, 4])
+                .unwrap()
+        );
+        let overflow = running
+            .write_flash_buffer_while_running(u64::MAX - 1, &[1, 2, 3, 4])
+            .unwrap_err();
+        assert!(matches!(
+            overflow,
+            ProbeRsError::Riscv(RiscvError::SystemMemoryAddressOverflow { .. })
+        ));
+
+        assert!(
+            !interface_without_system_ap(Rc::new(RefCell::new(MemoryState::default())))
+                .write_flash_buffer_while_running(0xa00000, &[1, 2, 3, 4])
+                .unwrap()
+        );
+
+        let failing = Rc::new(RefCell::new(MemoryState {
+            fail_after_first_write: true,
+            ..Default::default()
+        }));
+        let error = interface(false, failing.clone())
+            .write_flash_buffer_while_running(0xa00000, &[1, 2, 3, 4])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProbeRsError::Riscv(RiscvError::SystemMemoryAccess {
+                operation: "write_flash_buffer_while_running",
+                ..
+            })
+        ));
+        assert_eq!(failing.borrow().byte_writes, [(0xa00000, 1)]);
     }
 }
 
