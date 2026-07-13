@@ -332,9 +332,15 @@ impl Flasher {
     where
         F: FnOnce(&mut ActiveFlasher<'_, 'p, Erase>, &mut [LoadedRegion]) -> Result<T, FlashError>,
     {
+        let init_started = Instant::now();
         let (mut active, data) = self.init(session, progress, None)?;
+        tracing::debug!(operation = "erase", stage = "init", elapsed = ?init_started.elapsed(), "Flash algorithm stage completed");
+        let operation_started = Instant::now();
         let r = f(&mut active, data)?;
+        tracing::debug!(operation = "erase", stage = "operation", elapsed = ?operation_started.elapsed(), "Flash algorithm stage completed");
+        let uninit_started = Instant::now();
         active.uninit()?;
+        tracing::debug!(operation = "erase", stage = "uninit", elapsed = ?uninit_started.elapsed(), "Flash algorithm stage completed");
         Ok(r)
     }
 
@@ -351,9 +357,15 @@ impl Flasher {
             &mut [LoadedRegion],
         ) -> Result<T, FlashError>,
     {
+        let init_started = Instant::now();
         let (mut active, data) = self.init(session, progress, None)?;
+        tracing::debug!(operation = "program", stage = "init", elapsed = ?init_started.elapsed(), "Flash algorithm stage completed");
+        let operation_started = Instant::now();
         let r = f(&mut active, data)?;
+        tracing::debug!(operation = "program", stage = "operation", elapsed = ?operation_started.elapsed(), "Flash algorithm stage completed");
+        let uninit_started = Instant::now();
         active.uninit()?;
+        tracing::debug!(operation = "program", stage = "uninit", elapsed = ?uninit_started.elapsed(), "Flash algorithm stage completed");
         Ok(r)
     }
 
@@ -367,9 +379,15 @@ impl Flasher {
     where
         F: FnOnce(&mut ActiveFlasher<'_, 'p, Verify>, &mut [LoadedRegion]) -> Result<T, FlashError>,
     {
+        let init_started = Instant::now();
         let (mut active, data) = self.init(session, progress, None)?;
+        tracing::debug!(operation = "verify", stage = "init", elapsed = ?init_started.elapsed(), "Flash algorithm stage completed");
+        let operation_started = Instant::now();
         let r = f(&mut active, data)?;
+        tracing::debug!(operation = "verify", stage = "operation", elapsed = ?operation_started.elapsed(), "Flash algorithm stage completed");
+        let uninit_started = Instant::now();
         active.uninit()?;
+        tracing::debug!(operation = "verify", stage = "uninit", elapsed = ?uninit_started.elapsed(), "Flash algorithm stage completed");
         Ok(r)
     }
 
@@ -635,8 +653,10 @@ impl Flasher {
         let encoding = self.flash_algorithm.transfer_encoding;
 
         let result = self.run_erase(session, progress, |active, data| {
+            let mut sector_count = 0usize;
             for region in data.iter_mut() {
                 for sector in region.data.encoder(encoding, false).sectors() {
+                    sector_count += 1;
                     active
                         .erase_sector(sector)
                         .map_err(|e| FlashError::EraseFailed {
@@ -645,6 +665,7 @@ impl Flasher {
                         })?;
                 }
             }
+            tracing::debug!(sector_count, "Flash erase calls completed");
             Ok(())
         });
 
@@ -721,6 +742,9 @@ impl Flasher {
     ) -> Result<(), FlashError> {
         let encoding = self.flash_algorithm.transfer_encoding;
         self.run_program(session, progress, |active, data| {
+            let mut page_count = 0usize;
+            let mut host_bytes = 0usize;
+            let mut host_to_ram_elapsed = Duration::ZERO;
             for region in data.iter_mut() {
                 tracing::debug!(
                     "    programming region: {:#010X?} ({} bytes)",
@@ -734,7 +758,11 @@ impl Flasher {
                 let mut last_page_address = 0;
                 for page in flash_encoder.pages() {
                     // At the start of each loop cycle load the next page buffer into RAM.
+                    let load_started = Instant::now();
                     let buffer_address = active.load_page_buffer(page.data(), current_buf)?;
+                    host_to_ram_elapsed += load_started.elapsed();
+                    page_count += 1;
+                    host_bytes += page.data().len();
 
                     // Then wait for the active RAM -> Flash copy process to finish.
                     // Also check if it finished properly. If it didn't, return an error.
@@ -764,6 +792,7 @@ impl Flasher {
 
                 active.wait_for_write_end(last_page_address)?;
             }
+            tracing::debug!(page_count, host_bytes, elapsed = ?host_to_ram_elapsed, "Host-to-RAM page loads completed");
             Ok(())
         })
     }
