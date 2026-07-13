@@ -361,6 +361,33 @@ impl ChipFamily {
                             return Err(format!("Core {} requires setting cti_base", core.name));
                         }
                     }
+                    CoreAccessOptions::Riscv(options) => {
+                        if options.system_memory_ap.is_some()
+                            != !options.system_memory_ranges.is_empty()
+                        {
+                            return Err(format!(
+                                "Core {} must configure system_memory_ap and system_memory_ranges together",
+                                core.name
+                            ));
+                        }
+
+                        let mut previous_end = None;
+                        for range in &options.system_memory_ranges {
+                            if range.start >= range.end {
+                                return Err(format!(
+                                    "Core {} has an empty or reversed system-memory range {:#x?}",
+                                    core.name, range
+                                ));
+                            }
+                            if previous_end.is_some_and(|end| range.start < end) {
+                                return Err(format!(
+                                    "Core {} has overlapping or unsorted system-memory ranges",
+                                    core.name
+                                ));
+                            }
+                            previous_end = Some(range.end);
+                        }
+                    }
                     _ => {}
                 }
             }

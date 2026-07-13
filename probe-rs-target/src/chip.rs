@@ -6,6 +6,7 @@ use crate::{
     serialize::{hex_option, hex_u_int},
 };
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
 /// Represents a DAP scan chain element.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -243,6 +244,21 @@ pub struct RiscvCoreAccessOptions {
     /// is mapped at a fixed offset set this — e.g. HiSilicon WS63 (`0x8000_0000`).
     #[serde(default)]
     pub dm_base: u64,
+
+    /// Optional CoreSight Memory-AP used for direct system-memory accesses.
+    ///
+    /// This is independent from [`Self::mem_ap`], which remains the transport
+    /// for DMI operations. Direct accesses are opt-in and limited to
+    /// [`Self::system_memory_ranges`].
+    #[serde(default)]
+    pub system_memory_ap: Option<ApAddress>,
+
+    /// Address ranges which may be accessed through [`Self::system_memory_ap`].
+    ///
+    /// Both ends use the usual half-open range convention (`start..end`). An
+    /// empty list disables direct system-memory access.
+    #[serde(default)]
+    pub system_memory_ranges: Vec<Range<u64>>,
 }
 
 /// The data required to access an Xtensa core
