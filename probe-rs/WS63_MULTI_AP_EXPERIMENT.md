@@ -172,6 +172,34 @@ completed full verify and reached all RF UART gates. Consequently 4 MHz is
 rejected for this probe/board combination despite its attractive one-run time,
 and 3 MHz is the highest speed supported by the current evidence.
 
+## Cross-TAR write batching
+
+The generic ADI `write_32` path now preserves the mandatory 1 KiB TAR
+autoincrement boundaries while submitting each ordered
+`TAR, DRW..., TAR, DRW...` sequence as one low-level probe batch. Backends that
+do not implement mixed-register batching retain the previous per-register
+default. The optimization is not WS63-specific and applies to ordinary halted
+Memory-AP writes as well as the explicit running flash-buffer path. A mock test
+writes 513 words across two boundaries and verifies one batch with TAR values
+`0x0`, `0x400`, and `0x800`.
+
+At 2 MHz a protected 64 KiB AP1 write/read/restore improved to 95.7 KiB/s.
+The following debug-instrumented results are medians of three full-verify,
+physical-nRST, UART-checked runs and compare directly with the 2 MHz rows above:
+
+| Image | Mode | host -> RAM | Verify | CLI total | Wall | CLI improvement |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `uart_hello` | single | 0.661 s | 0.864 s | 3.07 s | 5.47 s | 9.4% |
+| `uart_hello` | explicit AP1 double | 0.658 s | 0.866 s | 3.06 s | 5.47 s | 9.7% |
+| `wifi_init_smoke` | single | 4.024 s | 5.278 s | 13.09 s | 15.49 s | 7.9% |
+| `wifi_init_smoke` | explicit AP1 double | 4.024 s | 5.290 s | 12.77 s | 15.17 s | 8.0% |
+
+All twelve formal downloads passed full verify and their UART gates. The new
+path also passed 100 protected reconnect cycles and 100 protected physical
+nRST/recovery cycles. Errors remain explicit: the mixed batch returns the first
+failed DAP transfer, and callers do not retry a partially issued logical write
+through another memory path.
+
 ## Deliberate limits
 
 - Generic running-state AP1 access is not enabled by target metadata.
