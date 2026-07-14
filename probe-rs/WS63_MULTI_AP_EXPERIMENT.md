@@ -129,6 +129,49 @@ reset. Every extended RF capture reached `RF1_IMAGE_OK`, `RF2_INIT_OK`, and
 `RF3_SCAN_OK`; the later `RF5B_CONFIG_ERR:0x00000005` / missing
 `RF5C_PING_OK` remains the known firmware/configuration issue.
 
+## Stage timing and SWD speed sweep
+
+A second timing pass enabled the flasher's debug stage events, so its absolute
+CLI times include diagnostic logging overhead and should be compared only with
+other rows in this section. Each accepted row is the median of three complete
+download + full verify + physical nRST + UART runs. `host -> RAM` is the sum of
+the program-page AP1 uploads. `RAM -> SFC/rest` is the program-operation elapsed
+time less that upload sum; for double buffering it is the non-overlapped
+remainder, not the sum of all target page durations. `fixed` is wall time less
+the CLI download time and includes attach, loader construction, teardown, and
+the external timing boundary.
+
+| Image | SWD | Mode | Erase | host -> RAM | RAM -> SFC/rest | Verify | CLI total | Wall | Fixed |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `uart_hello` | 2 MHz | single | 0.244 s | 0.727 s | 0.181 s | 0.963 s | 3.39 s | 6.02 s | 2.63 s |
+| `uart_hello` | 2 MHz | explicit AP1 double | 0.248 s | 0.731 s | 0.178 s | 0.954 s | 3.39 s | 6.01 s | 2.62 s |
+| `wifi_init_smoke` | 2 MHz | single | 1.478 s | 4.350 s | 1.372 s | 5.740 s | 14.22 s | 16.84 s | 2.62 s |
+| `wifi_init_smoke` | 2 MHz | explicit AP1 double | 1.486 s | 4.348 s | 1.048 s | 5.700 s | 13.88 s | 16.49 s | 2.61 s |
+| `uart_hello` | 3 MHz | single | 0.240 s | 0.538 s | 0.170 s | 0.746 s | 2.88 s | 5.37 s | 2.49 s |
+| `uart_hello` | 3 MHz | explicit AP1 double | 0.238 s | 0.532 s | 0.169 s | 0.742 s | 2.87 s | 5.35 s | 2.48 s |
+| `wifi_init_smoke` | 3 MHz | single | 1.400 s | 3.169 s | 1.282 s | 4.462 s | 11.51 s | 13.99 s | 2.48 s |
+| `wifi_init_smoke` | 3 MHz | explicit AP1 double | 1.403 s | 3.175 s | 0.969 s | 4.465 s | 11.21 s | 13.67 s | 2.46 s |
+
+The 2 MHz data shows that the two program/verify AP1 uploads account for about
+8.7 seconds, or 61% of the RF single-buffer CLI time. Raising SWD to 3 MHz
+reduced the RF double-buffer host upload by 27.0%, CLI time by 19.2%, and wall
+time by 17.1%. It passed 100 protected reconnect cycles, 100 protected physical
+nRST/recovery cycles, and all twelve formal full-verify/UART runs. A final 2 MHz
+read-only baseline still returned `0xefbeadde`, measured 85.6/85.4/85.3 KiB/s
+for 4/32/64 KiB AP1 reads, and completed 1,000 matching AP0/AP1 read pairs.
+
+This J-Link OB reports a 96 MHz base clock with minimum divisor 24, so its
+maximum supported SWD setting is 4 MHz. Requests for 5, 6, 8, and 10 MHz were
+rejected before target I/O. A 4 MHz RF double-buffer run initially passed and
+both 100-cycle reconnect and nRST gates passed, but a later formal RF
+single-buffer run lost AP0/DMI core-status communication during the second
+sector erase. The process failed explicitly without fallback. The first fresh
+2 MHz single-buffer recovery then programmed the image but failed full verify
+at `0x00230300`; after physical nRST, a fresh 2 MHz explicit-double run
+completed full verify and reached all RF UART gates. Consequently 4 MHz is
+rejected for this probe/board combination despite its attractive one-run time,
+and 3 MHz is the highest speed supported by the current evidence.
+
 ## Deliberate limits
 
 - Generic running-state AP1 access is not enabled by target metadata.
