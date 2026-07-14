@@ -1120,6 +1120,47 @@ impl<Probe: DebugProbe + RawSwdIo + JtagAccess + 'static> RawDapAccess for Probe
         Ok(())
     }
 
+    fn raw_write_registers(
+        &mut self,
+        registers: &[(RegisterAddress, u32)],
+    ) -> Result<(), ArmError> {
+        if registers.is_empty() {
+            return Ok(());
+        }
+
+        let mut transfers = registers
+            .iter()
+            .map(|&(address, value)| DapTransfer::write(address, value))
+            .collect::<Vec<_>>();
+
+        perform_transfers(self, &mut transfers)?;
+
+        for (index, result) in transfers.iter().enumerate() {
+            match result.status {
+                TransferStatus::Ok => {}
+                TransferStatus::Failed(error) => {
+                    tracing::debug!(
+                        "Error in access {}/{} of mixed-register write batch: {}",
+                        index + 1,
+                        registers.len(),
+                        error
+                    );
+
+                    if error == DapError::FaultResponse {
+                        clear_overrun_and_sticky_err(self)?;
+                    }
+
+                    return Err(error.into());
+                }
+                other => panic!(
+                    "Unexpected transfer state after writing registers: {other:?}. This is a bug!"
+                ),
+            }
+        }
+
+        Ok(())
+    }
+
     fn swj_pins(
         &mut self,
         pin_out: u32,

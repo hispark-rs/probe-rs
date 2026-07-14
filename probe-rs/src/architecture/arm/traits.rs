@@ -259,6 +259,22 @@ pub trait RawDapAccess {
         Ok(())
     }
 
+    /// Write values to a sequence of DAP registers in one probe batch when supported.
+    ///
+    /// Only bits 2 and 3 of each address are used. Bank switching is the caller's
+    /// responsibility. The default preserves the ordering and failure behavior by
+    /// issuing the writes individually.
+    fn raw_write_registers(
+        &mut self,
+        registers: &[(RegisterAddress, u32)],
+    ) -> Result<(), ArmError> {
+        for &(address, value) in registers {
+            self.raw_write_register(address, value)?;
+        }
+
+        Ok(())
+    }
+
     /// Flush any outstanding writes.
     ///
     /// By default, this does nothing -- but in probes that implement write
@@ -411,6 +427,23 @@ pub trait DapAccess {
         for val in values {
             self.write_raw_ap_register(ap, addr, *val)?;
         }
+        Ok(())
+    }
+
+    /// Write an ordered sequence of Access Port registers.
+    ///
+    /// Implementations may combine adjacent writes that use the same AP register
+    /// bank into a single probe transaction. The default keeps the established
+    /// per-register behavior.
+    fn write_raw_ap_registers(
+        &mut self,
+        ap: &FullyQualifiedApAddress,
+        registers: &[(u64, u32)],
+    ) -> Result<(), ArmError> {
+        for &(address, value) in registers {
+            self.write_raw_ap_register(ap, address, value)?;
+        }
+
         Ok(())
     }
 

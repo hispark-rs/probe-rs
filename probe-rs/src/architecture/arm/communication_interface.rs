@@ -609,6 +609,34 @@ impl DapAccess for ArmCommunicationInterface {
         Ok(())
     }
 
+    fn write_raw_ap_registers(
+        &mut self,
+        ap: &FullyQualifiedApAddress,
+        registers: &[(u64, u32)],
+    ) -> Result<(), ArmError> {
+        let mut remaining = registers;
+        while let Some(&(first_address, _)) = remaining.first() {
+            let bank = first_address >> 4;
+            let chunk_len = remaining
+                .iter()
+                .take_while(|(address, _)| address >> 4 == bank)
+                .count();
+            let (chunk, rest) = remaining.split_at(chunk_len);
+
+            self.select_ap_and_ap_bank(ap, first_address)?;
+            let raw_registers = chunk
+                .iter()
+                .map(|&(address, value)| {
+                    (RegisterAddress::ApRegister((address & 0xFF) as u8), value)
+                })
+                .collect::<Vec<_>>();
+            self.probe_mut().raw_write_registers(&raw_registers)?;
+            remaining = rest;
+        }
+
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), ArmError> {
         self.probe_mut().raw_flush()
     }

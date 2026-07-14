@@ -3,7 +3,7 @@ use crate::{
     architecture::arm::{
         ArmDebugInterface, ArmError, DapAccess, FullyQualifiedApAddress,
         ap::{
-            AccessPortType, ApAccess, CSW, DataSize,
+            AccessPortType, ApAccess, ApRegister, CSW, DRW, DataSize, TAR, TAR2,
             memory_ap::{MemoryAp, MemoryApType},
         },
         memory::ArmMemoryInterface,
@@ -328,6 +328,7 @@ where
         self.memory_ap
             .try_set_datasize(self.interface, DataSize::U32)?;
 
+        let mut registers = Vec::with_capacity(data.len() + data.len().div_ceil(256));
         while !data.is_empty() {
             let chunk_size = data.len().min(autoincr_max_bytes(address) / 4);
 
@@ -337,16 +338,32 @@ where
                 address
             );
 
-            // autoincrement is limited to the 10 lowest bits, so write TAR every time.
-            self.memory_ap.set_target_address(self.interface, address)?;
-            self.memory_ap
-                .write_data(self.interface, &data[..chunk_size])?;
+            // Autoincrement is limited to the 10 lowest bits, so include an
+            // explicit TAR update before every DRW chunk. Keeping these writes
+            // in one ordered register sequence lets capable probes batch across
+            // TAR boundaries without relaxing the architectural limit.
+            let address_upper = (address >> 32) as u32;
+            if self.memory_ap.has_large_address_extension() {
+                registers.push((TAR2::ADDRESS, address_upper));
+            } else if address_upper != 0 {
+                return Err(ArmError::OutOfBounds);
+            }
+            registers.push((TAR::ADDRESS, address as u32));
+            registers.extend(
+                data[..chunk_size]
+                    .iter()
+                    .copied()
+                    .map(|value| (DRW::ADDRESS, value)),
+            );
 
             address = address
                 .checked_add(chunk_size as u64 * 4)
                 .ok_or(ArmError::OutOfBounds)?;
             data = &data[chunk_size..];
         }
+
+        self.interface
+            .write_raw_ap_registers(self.memory_ap.ap_address(), &registers)?;
 
         tracing::debug!("Finished writing block");
 
@@ -771,6 +788,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn write_32_batches_across_autoincrement_boundaries() {
+        let mut mock = MockMemoryAp::with_pattern_and_size(4096);
+        let data = (0..513).map(|value| value as u32).collect::<Vec<_>>();
+
+        {
+            let mut mi = ADIMemoryInterface::new_mock(&mut mock);
+            mi.write_32(0, &data).expect("write_32 failed");
+        }
+
+        let expected = data
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(&mock.memory[..expected.len()], expected);
+        assert_eq!(mock.mixed_write_batches, 1);
+        assert_eq!(mock.tar_writes, [0, 0x400, 0x800]);
     }
 
     #[test]

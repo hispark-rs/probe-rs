@@ -12,6 +12,8 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct MockMemoryAp {
     pub memory: Vec<u8>,
+    pub mixed_write_batches: usize,
+    pub tar_writes: Vec<u32>,
     store: HashMap<u64, u32>,
 }
 
@@ -46,6 +48,8 @@ impl MockMemoryAp {
         store.insert(DRW::ADDRESS, 0);
         Self {
             memory: std::iter::repeat(1..=255).flatten().take(size).collect(),
+            mixed_write_batches: 0,
+            tar_writes: Vec::new(),
             store,
         }
     }
@@ -201,10 +205,23 @@ impl DapAccess for MockMemoryAp {
             }
             TAR::ADDRESS => {
                 self.store.insert(TAR::ADDRESS, value);
+                self.tar_writes.push(value);
                 Ok(())
             }
             _ => panic!("MockMemoryAp: unknown register"),
         }
+    }
+
+    fn write_raw_ap_registers(
+        &mut self,
+        ap: &crate::architecture::arm::FullyQualifiedApAddress,
+        registers: &[(u64, u32)],
+    ) -> Result<(), ArmError> {
+        self.mixed_write_batches += 1;
+        for &(address, value) in registers {
+            self.write_raw_ap_register(ap, address, value)?;
+        }
+        Ok(())
     }
 
     fn try_dap_probe(&self) -> Option<&dyn DapProbe> {
